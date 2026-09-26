@@ -143,7 +143,7 @@ def _receipt_review_keyboard(receipt_id: int, user_id: int | None = None, userna
             if username:
                 uname = str(username).lstrip('@')
                 if uname:
-                    rows.append([InlineKeyboardButton(text=f'🔗 @{uname}', url=f'https://example.com/{uname}')])
+                    rows.append([InlineKeyboardButton(text=f'🔗 @{uname}', url=f'https://t.me/{uname}')])
         except Exception:
             pass
     rows.append([InlineKeyboardButton(text='🔄 وضعیت', callback_data=f'cardadmin:view:{receipt_id}')])
@@ -241,7 +241,7 @@ def _approved_keyboard(receipt: dict, sub_url: str | None = None) -> InlineKeybo
         user = db.fetchone('SELECT username FROM bot_users WHERE telegram_id=?', (uid,)) or {}
         uname = (user.get('username') or '').strip().lstrip('@') if isinstance(user, dict) else ''
         if uname:
-            rows.append([InlineKeyboardButton(text=f'🔗 @{uname}', url=f'https://example.com/{uname}')])
+            rows.append([InlineKeyboardButton(text=f'🔗 @{uname}', url=f'https://t.me/{uname}')])
     except Exception:
         pass
     if receipt.get('kind') == 'order' and sub_url and str(sub_url).strip().startswith(('http://', 'https://')):
@@ -331,7 +331,7 @@ async def _notify_approvers(bot: Bot, receipt: dict) -> int:
             if msg_id:
                 msg_ids_dict[str(admin_id)] = msg_id
             sent += 1
-            example.com(f'Receipt #{receipt_id} sent to admin {admin_id} (msg_id={msg_id})')
+            logging.info(f'Receipt #{receipt_id} sent to admin {admin_id} (msg_id={msg_id})')
         except Exception as exc:
             err_str = f'Admin {admin_id}: {exc}'
             errors.append(err_str)
@@ -377,7 +377,7 @@ async def process_payment_receipt(
     
     Returns (success, receipt_row, approvers_notified_count).
     """
-    example.com(f'Processing receipt for user={user_id}, kind={kind}, entity={entity_id}, amount={amount}, type={order_type}')
+    logging.info(f'Processing receipt for user={user_id}, kind={kind}, entity={entity_id}, amount={amount}, type={order_type}')
     
     # 1. Safely persist / update the receipt record
     receipt_id = db.create_or_update_card_receipt(

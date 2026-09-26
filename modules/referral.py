@@ -63,7 +63,7 @@ async def referral_menu(message: Message, bot):
     reward = int(db.get_setting('referral_reward_toman', 0) or 0)
     condition = db.get_setting('referral_condition', 'payment')
     condition_text = 'بعد از پرداخت دعوت شده' if condition == 'payment' else 'بعد از ورود با لینک'
-    link = f'https://example.com/{me.username}?start=ref_{user_id}'
+    link = f'https://t.me/{me.username}?start=ref_{user_id}'
     await message.answer(
         '👥 دعوت دوستان\n\n'
         f'لینک دعوت شما:\n{copy_code(link)}\n\n'

@@ -176,7 +176,7 @@ async def global_error_handler(event) -> bool:
 
 async def main() -> None:
     validate_settings()
-    logging.basicConfig(level=example.com)
+    logging.basicConfig(level=logging.INFO)
     db.init_db()
     db.seed_roles_from_env()
     install_button_style_patch()

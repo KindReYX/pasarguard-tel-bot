@@ -24,7 +24,7 @@ class StarsState(StatesGroup):
 
 
 async def telegram_api(method: str, payload: dict[str, Any] | None = None) -> Any:
-    url = f'https://example.com/bot{settings.bot_token}/{method}'
+    url = f'https://api.telegram.org/bot{settings.bot_token}/{method}'
     async with aiohttp.ClientSession() as session:
         async with session.post(url, json=payload or {}) as response:
             data = await response.json(content_type=None)

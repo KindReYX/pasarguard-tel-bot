@@ -70,7 +70,7 @@ def user_join_keyboard(missing_channels: list[dict]) -> InlineKeyboardMarkup:
         invite_link = channel.get('invite_link')
         chat_id = str(channel.get('chat_id') or '')
         if not invite_link and chat_id.startswith('@'):
-            invite_link = f'https://example.com/{chat_id[1:]}'
+            invite_link = f'https://t.me/{chat_id[1:]}'
         if invite_link:
             rows.append([InlineKeyboardButton(text=f'عضویت در {title}', url=invite_link)])
     rows.append([InlineKeyboardButton(text='✅ بررسی عضویت', callback_data='join:check')])
@@ -246,7 +246,7 @@ async def join_add_start(callback: CallbackQuery, state: FSMContext):
         'فرمت پیشنهادی برای عمومی:\n'
         '@channel_username\n\n'
         'برای خصوصی:\n'
-        '-1001234567890 | نام کانال | https://example.com/+invite\n\n'
+        '-1001234567890 | نام کانال | https://t.me/+invite\n\n'
         'نکته: ربات باید داخل کانال/گروه عضو باشد و بهتر است ادمین باشد.',
         reply_markup=kb,
     )
@@ -274,13 +274,13 @@ async def join_add_value(message: Message, state: FSMContext, bot):
         title = manual_title or (chat.title or chat.full_name or raw_chat_id)
         if not invite_link:
             if getattr(chat, 'username', None):
-                invite_link = f'https://example.com/{chat.username}'
+                invite_link = f'https://t.me/{chat.username}'
             elif getattr(chat, 'invite_link', None):
                 invite_link = chat.invite_link
     except Exception:
         pass
     if raw_chat_id.startswith('@') and not invite_link:
-        invite_link = f'https://example.com/{raw_chat_id[1:]}'
+        invite_link = f'https://t.me/{raw_chat_id[1:]}'
     db.required_join_add(chat_id=chat_id, title=title, invite_link=invite_link, created_by=message.from_user.id)
     db.add_log(message.from_user.id, 'required_join_added', 'required_join', chat_id, {'title': title, 'invite_link': invite_link})
     invalidate_join_cache()

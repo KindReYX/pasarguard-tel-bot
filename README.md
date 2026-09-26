@@ -35,13 +35,51 @@
 
 ## نصب
 
+### نصب مستقیم از GitHub
+
+برای نصب پروژه از ریپازیتوری:
+
 ```bash
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# venv\Scripts\activate   # Windows
-pip install -r requirements.txt
+git clone https://github.com/KindReYX/pasarguard-tel-bot.git
+cd pasarguard-tel-bot
+```
+
+فایل تنظیمات را بسازید:
+
+```bash
 cp .env.example .env
+nano .env
+```
+
+مقادیر موردنیاز مثل Bot Token، آدرس پنل و اطلاعات API را داخل `.env` وارد کنید.
+
+### نصب خودکار روی Linux
+
+اگر پروژه را روی سرور Linux اجرا می‌کنید، بعد از تنظیم `.env` می‌توانید از اسکریپت نصب خودکار استفاده کنید:
+
+```bash
+sudo bash scripts/install_or_update.sh
+```
+
+این اسکریپت وابستگی‌ها، محیط Python و تنظیمات لازم برای اجرای پروژه را آماده می‌کند و در صورت پشتیبانی محیط، سرویس systemd را نیز راه‌اندازی می‌کند.
+
+### نصب دستی
+
+در صورت نیاز به نصب دستی:
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 python bot.py
+```
+
+برای بروزرسانی نسخه نصب‌شده از GitHub:
+
+```bash
+cd pasarguard-tel-bot
+git pull
+sudo bash scripts/install_or_update.sh
 ```
 
 ## API تمپلیت‌ها و گروه‌ها

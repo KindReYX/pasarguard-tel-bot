@@ -329,8 +329,6 @@ sudo bash scripts/restore_backup.sh /path/to/backup.db
 cp .env.example .env
 ```
 
-دامنه‌های نمونه این پروژه عمداً روی `example.com` قرار گرفته‌اند. دامنه‌ها و credentialهای واقعی خود را فقط در محیط محلی تنظیم کنید و آن‌ها را داخل Git commit نکنید.
-
 ---
 
 Made with ❤️ and AI

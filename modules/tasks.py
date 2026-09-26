@@ -41,6 +41,8 @@ def start_background_tasks(bot: Bot) -> None:
     asyncio.create_task(test_service_reminder_loop(bot))
     asyncio.create_task(navasan_rate_loop())
     asyncio.create_task(receipt_delivery_retry_loop(bot))
+    from modules.updater import github_update_loop
+    asyncio.create_task(github_update_loop(bot))
 
 
 async def receipt_delivery_retry_loop(bot: Bot) -> None:

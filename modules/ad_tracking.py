@@ -28,7 +28,7 @@ def _money(value: int) -> str:
 
 async def _campaign_link(bot, slug: str) -> str:
     me = await bot.get_me()
-    return f'https://example.com/{me.username}?start=ad_{slug}'
+    return f'https://t.me/{me.username}?start=ad_{slug}'
 
 
 def _slug(name: str) -> str:

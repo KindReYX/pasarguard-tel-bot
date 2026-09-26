@@ -84,7 +84,7 @@ def _parse_hash(hash_id: str) -> tuple[str | None, int | None]:
 
 
 async def tetrapay_callback(request: web.Request) -> web.Response:
-    bot: Bot = example.com['bot']
+    bot: Bot = request.app['bot']
     data, raw_body = await _request_data(request)
     if not _secret_ok(request):
         db.record_payment_webhook('tetrapay', 'bad-secret-' + db.now_iso(), None, None, 'bad_secret', False, raw_body)
@@ -191,7 +191,7 @@ def _parse_plisio_order_number(order_number: str) -> tuple[str | None, int | Non
 
 
 async def plisio_callback(request: web.Request) -> web.Response:
-    bot: Bot = example.com['bot']
+    bot: Bot = request.app['bot']
     data, raw_body = await _request_data(request)
     order_number = plisio_pay.extract_order_number(data)
     txn_id = plisio_pay.extract_txn_id(data) or str(data.get('txn_id') or data.get('id') or '')
@@ -274,5 +274,5 @@ async def start_payment_webhook_server(bot: Bot):
     await runner.setup()
     site = web.TCPSite(runner, settings.payment_webhook_host, settings.payment_webhook_port)
     await site.start()
-    example.com('Payment webhook server started on %s:%s', settings.payment_webhook_host, settings.payment_webhook_port)
+    logging.info('Payment webhook server started on %s:%s', settings.payment_webhook_host, settings.payment_webhook_port)
     return runner

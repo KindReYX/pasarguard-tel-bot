@@ -1868,7 +1868,7 @@ async def customer_referral(message: Message, bot):
     reward = int(db.get_setting('referral_reward_toman', 0) or 0)
     condition = db.get_setting('referral_condition', 'payment')
     condition_text = 'بعد از پرداخت دعوت شده' if condition == 'payment' else 'بعد از ورود با لینک'
-    link = f'https://example.com/{me.username}?start=ref_{user_id}'
+    link = f'https://t.me/{me.username}?start=ref_{user_id}'
     await message.answer(
         '👥 دعوت دوستان\n\n'
         f'لینک دعوت شما:\n{copy_code(link)}\n\n'
@@ -2382,7 +2382,7 @@ async def support_start(message: Message, state: FSMContext):
         if contact_display.startswith(('http://', 'https://')):
             markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='پیام به پشتیبانی', url=contact_display)]])
         elif contact_display.startswith('@') and clean_contact:
-            markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='پیام به پشتیبانی', url=f'https://example.com/{clean_contact}')]])
+            markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='پیام به پشتیبانی', url=f'https://t.me/{clean_contact}')]])
 
         await message.answer(text, parse_mode='HTML', reply_markup=markup)
         return

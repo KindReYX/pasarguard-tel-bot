@@ -328,7 +328,7 @@ sudo bash scripts/restore_backup.sh /path/to/backup.db
 ```bash
 cp .env.example .env
 ```
-
+\n\n## بروزرسانی از GitHub و Releaseها\n\nنسخه اولیه پروژه `0.1.0` است و شماره نسخه در فایل `version.py` نگهداری می‌شود.\n\nدر **تنظیمات پیشرفته → ⬆️ تنظیمات بروزرسانی** سه کنترل اصلی وجود دارد:\n\n- بررسی دستی آپدیت با دکمه `🔄 بررسی آپدیت همین الان`\n- روشن/خاموش کردن چک خودکار هر ۲۴ ساعت\n- روشن/خاموش کردن نصب خودکار Release جدید\n\nوقتی نصب آپدیت از داخل تلگرام شروع شود، روند کار در همان پیام با درصد و توضیح ساده نمایش داده می‌شود. قبل از نصب بکاپ دیتابیس گرفته می‌شود و در صورت شکست، سیستم تلاش می‌کند به commit قبلی rollback کند.\n\nبرای فعال شدن دکمه نصب روی سرور، پروژه باید با `git clone` نصب شده باشد و یک بار نصب‌کننده اجرا شود:\n\n```bash\nsudo bash scripts/install_or_update.sh\n```\n\n### ساخت Release\n\nبرای اولین نسخه، `version.py` باید شامل این مقدار باشد:\n\n```python\n__version__ = "0.1.0"\n```\n\nسپس:\n\n```bash\ngit add .\ngit commit -m "Release v0.1.0"\ngit push origin main\ngit tag -a v0.1.0 -m "Release v0.1.0"\ngit push origin v0.1.0\n```\n\nدر GitHub وارد **Releases** شوید، **Draft a new release** را بزنید، تگ `v0.1.0` را انتخاب و Release را Publish کنید. updater فقط Release منتشرشده را بررسی می‌کند.\n\nنسخه‌های بعدی را با SemVer ادامه دهید، مثلاً `0.1.1` برای رفع باگ و `0.2.0` برای قابلیت جدید.\n
 ---
 
 Made with ❤️ and AI

@@ -54,6 +54,7 @@ GROUPS: dict[str, str] = {
     'referral': '👥 تنظیمات دعوت دوستان',
     'test': '🧪 تنظیمات سرویس تست',
     'renewal': '🔁 تنظیمات تمدید',
+    'updates': '⬆️ تنظیمات بروزرسانی',
     'qr': '🖼 تنظیمات QR',
     'system': '⚙️ تنظیمات سیستمی قابل تغییر',
 }
@@ -162,6 +163,8 @@ SETTINGS: list[SettingItem] = [
     SettingItem('test_service_cooldown_days', 'فاصله دریافت مجدد سرویس تست (روز)', 'test', 'int', 14, 'مثال: 14 یعنی کاربر 14 روز بعد دوباره می تواند تست بگیرد.'),
     SettingItem('test_service_reminder_text', 'متن یادآوری امکان دریافت مجدد تست', 'test', 'text', '🧪 دوباره می‌توانید سرویس تست بگیرید.\n\nاز منوی ربات وارد بخش «سرویس تست» شوید و سرویس جدیدتان را دریافت کنید.', 'متغیرها: {name} {first_name} {username} {user_id} {cooldown_days} {support}'),
     SettingItem('renewal_mode', 'نحوه اعمال تمدید', 'renewal', 'text', 'add', 'add = افزودن زمان/حجم باقی‌مانده | replace = جایگزینی و سوزاندن باقی‌مانده'),
+    SettingItem('github_auto_check_enabled', 'چک خودکار آپدیت هر 24 ساعت', 'updates', 'bool', True, 'اگر خاموش باشد، فقط با دکمه «بررسی آپدیت همین الان» GitHub بررسی می‌شود.'),
+    SettingItem('github_auto_update_enabled', 'نصب خودکار آپدیت', 'updates', 'bool', False, 'اگر روشن باشد و چک خودکار هم روشن باشد، Release جدید بعد از شناسایی به صورت خودکار نصب می‌شود.'),
 
     # QR delivery
     SettingItem('qr_size_percent', 'اندازه QR روی تصویر (درصد)', 'qr', 'int', 42, 'عدد 1 تا 100؛ 100 یعنی QR تمام ضلع کوتاه تصویر را می گیرد.'),
@@ -255,6 +258,8 @@ def category_keyboard(group: str) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text='🔙 برگشت به گروه ها', callback_data='adv:home')],
         ])
     rows = []
+    if group == 'updates':
+        rows.append([InlineKeyboardButton(text='🔄 بررسی آپدیت همین الان', callback_data='ghupd:check')])
     for item in SETTINGS:
         if item.group != group:
             continue
@@ -331,6 +336,11 @@ async def advanced_category(callback: CallbackQuery):
         await answer_callback(callback)
         return
     lines = [GROUPS[group], '']
+    if group == 'updates':
+        from version import __version__
+        latest = str(db.get_setting('github_update_latest_version', '') or 'هنوز بررسی نشده')
+        last_check = str(db.get_setting('github_update_last_check_at', '') or 'هنوز بررسی نشده')
+        lines.extend([f'نسخه نصب شده: {__version__}', f'آخرین نسخه دیده شده: {latest}', f'آخرین بررسی: {last_check}', ''])
     for item in SETTINGS:
         if item.group == group:
             lines.append(f'{item.label}: {_value_text(item)}')

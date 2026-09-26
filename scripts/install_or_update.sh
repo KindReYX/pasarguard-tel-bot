@@ -47,8 +47,35 @@ echo "[4/7] Compile + migrate + preflight"
 venv/bin/python -W error::SyntaxWarning -m py_compile ./*.py modules/*.py scripts/*.py
 venv/bin/python scripts/preflight.py --migrate
 
-echo "[5/7] Install/update systemd service"
+echo "[5/7] Install/update systemd service + secure self-update helper"
 sed -e "s|__PROJECT_DIR__|$PROJECT_DIR|g" -e "s|__SERVICE_USER__|$SERVICE_USER|g" deploy/pasarguard-admin-bot.service > "/etc/systemd/system/$SERVICE_NAME"
+if [ "$SERVICE_USER" != "root" ] && ! command -v sudo >/dev/null 2>&1; then
+  apt-get update && apt-get install -y sudo
+fi
+mkdir -p /usr/local/libexec /etc/sudoers.d
+install -o root -g root -m 0755 scripts/apply_github_update.sh /usr/local/libexec/pasarguard-apply-update
+cat > /usr/local/sbin/pasarguard-bot-update <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+TAG="\${1:-}"
+if [[ ! "\$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "Invalid version tag" >&2; exit 2; fi
+PROJECT_DIR='$PROJECT_DIR'
+SERVICE_NAME='$SERVICE_NAME'
+SERVICE_USER='$SERVICE_USER'
+UNIT="pasarguard-bot-update-\$(date +%s)"
+exec systemd-run --unit="\$UNIT" --collect --property=Type=oneshot \
+  --setenv=PROJECT_DIR="\$PROJECT_DIR" --setenv=SERVICE_NAME="\$SERVICE_NAME" --setenv=SERVICE_USER="\$SERVICE_USER" \
+  /usr/local/libexec/pasarguard-apply-update "\$TAG"
+EOF
+chmod 0755 /usr/local/sbin/pasarguard-bot-update
+chown root:root /usr/local/sbin/pasarguard-bot-update /usr/local/libexec/pasarguard-apply-update
+if [ "$SERVICE_USER" != "root" ]; then
+  cat > /etc/sudoers.d/pasarguard-bot-updater <<EOF
+$SERVICE_USER ALL=(root) NOPASSWD: /usr/local/sbin/pasarguard-bot-update *
+EOF
+  chmod 0440 /etc/sudoers.d/pasarguard-bot-updater
+  if command -v visudo >/dev/null 2>&1; then visudo -cf /etc/sudoers.d/pasarguard-bot-updater >/dev/null; fi
+fi
 systemctl daemon-reload
 systemctl enable "$SERVICE_NAME" >/dev/null
 

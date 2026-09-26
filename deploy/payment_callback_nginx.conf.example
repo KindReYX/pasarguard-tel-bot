@@ -1,0 +1,65 @@
+# Example generated config for payment callback domain.
+# The setup script creates the real file automatically from .env:
+#   sudo bash scripts/setup_payment_nginx.sh
+
+server {
+    listen 80;
+    server_name example.com;
+
+    location = /health {
+        proxy_pass http://127.0.0.1:8081/health;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /payments/ {
+        proxy_pass http://127.0.0.1:8081/payments/;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location / {
+        default_type text/plain;
+        return 200 "payment callback server\n";
+    }
+}
+
+# Optional 443 block. Use only if Cloudflare SSL mode is Full or Full strict
+# and you have a valid origin certificate on your server.
+#
+# server {
+#     listen 443 ssl;
+#     server_name example.com;
+#
+#     ssl_certificate /etc/ssl/cloudflare/example.com.pem;
+#     ssl_certificate_key /etc/ssl/cloudflare/example.com.key;
+#
+#     location = /health {
+#         proxy_pass http://127.0.0.1:8081/health;
+#         proxy_http_version 1.1;
+#         proxy_set_header Host $host;
+#         proxy_set_header X-Real-IP $remote_addr;
+#         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+#         proxy_set_header X-Forwarded-Proto $scheme;
+#     }
+#
+#     location /payments/ {
+#         proxy_pass http://127.0.0.1:8081/payments/;
+#         proxy_http_version 1.1;
+#         proxy_set_header Host $host;
+#         proxy_set_header X-Real-IP $remote_addr;
+#         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+#         proxy_set_header X-Forwarded-Proto $scheme;
+#     }
+#
+#     location / {
+#         default_type text/plain;
+#         return 200 "payment callback server https\n";
+#     }
+# }

@@ -1,0 +1,35 @@
+# Secrets / local configuration
+.env
+.env.*
+!.env.example
+
+# Runtime databases and backups
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*backup*.db
+*before-restore*
+
+# User/generated exports and logs
+*.log
+users_export.*
+exports/
+backups/
+
+# Optional local QR background / branding
+back.jpg
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store

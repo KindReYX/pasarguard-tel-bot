@@ -25,9 +25,34 @@ def now_iso_dt() -> datetime:
     return datetime.utcnow()
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """sqlite connection whose context manager also closes the file handle.
+
+    sqlite3.Connection.__exit__ only commits/rolls back; it does *not* close the
+    connection. Most of this project intentionally uses ``with connect()`` for
+    short-lived queries, so leaving the default behavior leaks one connection
+    (and WAL/file descriptors) per DB operation until the process exhausts its
+    open-file limit.
+    """
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 def connect() -> sqlite3.Connection:
-    Path(settings.db_path).parent.mkdir(parents=True, exist_ok=True) if Path(settings.db_path).parent != Path('.') else None
-    conn = sqlite3.connect(settings.db_path, timeout=30)
+    db_path = Path(settings.db_path).expanduser()
+    if not db_path.is_absolute():
+        # Resolve relative DB_PATH once against the process working directory.
+        # Production systemd uses the project directory as WorkingDirectory.
+        db_path = (Path.cwd() / db_path).resolve()
+    else:
+        db_path = db_path.resolve()
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    conn = sqlite3.connect(str(db_path), timeout=30, factory=_ClosingConnection)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA busy_timeout=30000')
     conn.execute('PRAGMA journal_mode=WAL')

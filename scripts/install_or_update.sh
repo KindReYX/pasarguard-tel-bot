@@ -88,7 +88,7 @@ PROJECT_DIR='$PROJECT_DIR'
 SERVICE_NAME='$SERVICE_NAME'
 SERVICE_USER='$SERVICE_USER'
 UNIT="pasarguard-bot-update-\$(date +%s)"
-exec systemd-run --unit="\$UNIT" --collect --property=Type=oneshot \
+exec systemd-run --no-block --quiet --unit="\$UNIT" --collect --property=Type=oneshot \
   --setenv=PROJECT_DIR="\$PROJECT_DIR" --setenv=SERVICE_NAME="\$SERVICE_NAME" --setenv=SERVICE_USER="\$SERVICE_USER" \
   /usr/local/libexec/pasarguard-apply-update "\$TAG"
 EOF

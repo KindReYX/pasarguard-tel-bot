@@ -72,6 +72,7 @@ _PATCHED = False
 # made saved custom texts appear to disappear after moving/updating the bot.
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _TEXT_LEGACY_KEYS: dict[str, list[str]] = {}
+_CALLSITE_SOURCE_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def _project_relative_source(filename: str) -> str | None:
@@ -101,46 +102,87 @@ def _redacted_ast(node: ast.AST) -> str:
 
 
 def _callsite_ast_fingerprint(filename: str, lineno: int, func_name: str, kind: str) -> str:
-    """Build a location-independent fingerprint for the exact outgoing call.
+    """Build a stable fingerprint while parsing each source file only once.
 
-    The fingerprint is based on the AST shape of the call with literal values
-    redacted.  An ordinal among identical call shapes inside the same function
-    prevents two ``message.answer("...")`` calls from sharing one ID.
+    v0.2.1 reparsed the whole file for every discovered call-site. On a project
+    with 1,400+ calls that made startup migrations unnecessarily slow. This cache
+    keeps the exact same stable-ID algorithm while reusing the parsed AST and
+    precomputed call shapes/ordinals for the lifetime of the process.
     """
     rel = _project_relative_source(filename) or Path(filename).name
+    cache_key = str(Path(filename).resolve())
     try:
-        source = Path(filename).read_text(encoding='utf-8')
-        tree = ast.parse(source)
+        cached = _CALLSITE_SOURCE_CACHE.get(cache_key)
+        if cached is None:
+            source = Path(filename).read_text(encoding='utf-8')
+            tree = ast.parse(source)
+            functions = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+            all_calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+            shapes = {id(n): _redacted_ast(n) for n in all_calls}
+            cached = {
+                'tree': tree,
+                'functions': functions,
+                'all_calls': all_calls,
+                'shapes': shapes,
+                'scopes': {},
+                'resolved': {},
+            }
+            _CALLSITE_SOURCE_CACHE[cache_key] = cached
 
-        functions = [
-            n for n in ast.walk(tree)
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and n.name == func_name
-            and getattr(n, 'lineno', 0) <= int(lineno) <= getattr(n, 'end_lineno', 10**9)
-        ]
-        func_node = min(functions, key=lambda n: getattr(n, 'end_lineno', lineno) - getattr(n, 'lineno', lineno)) if functions else None
-        scope = func_node or tree
+        resolved_key = (int(lineno), str(func_name))
+        resolved = cached['resolved'].get(resolved_key)
+        if resolved is None:
+            functions = [
+                n for n in cached['functions']
+                if n.name == func_name
+                and getattr(n, 'lineno', 0) <= int(lineno) <= getattr(n, 'end_lineno', 10**9)
+            ]
+            func_node = min(
+                functions,
+                key=lambda n: getattr(n, 'end_lineno', lineno) - getattr(n, 'lineno', lineno),
+            ) if functions else None
+            scope = func_node or cached['tree']
+            scope_id = id(scope)
+            scope_data = cached['scopes'].get(scope_id)
+            if scope_data is None:
+                calls = [n for n in ast.walk(scope) if isinstance(n, ast.Call)]
+                by_shape: dict[str, list[ast.Call]] = {}
+                for node in calls:
+                    shape = cached['shapes'].get(id(node))
+                    if shape is None:
+                        shape = _redacted_ast(node)
+                        cached['shapes'][id(node)] = shape
+                    by_shape.setdefault(shape, []).append(node)
+                slots: dict[int, int] = {}
+                for nodes in by_shape.values():
+                    nodes.sort(key=lambda n: (getattr(n, 'lineno', 0), getattr(n, 'col_offset', 0)))
+                    for idx, node in enumerate(nodes):
+                        slots[id(node)] = idx
+                scope_data = {'calls': calls, 'slots': slots}
+                cached['scopes'][scope_id] = scope_data
 
-        calls = [
-            n for n in ast.walk(scope)
-            if isinstance(n, ast.Call)
-            and getattr(n, 'lineno', 0) <= int(lineno) <= getattr(n, 'end_lineno', getattr(n, 'lineno', 0))
-        ]
-        if calls:
-            target = min(calls, key=lambda n: ((getattr(n, 'end_lineno', lineno) - getattr(n, 'lineno', lineno)), len(ast.dump(n))))
-            shape = _redacted_ast(target)
-            same_shape = []
-            for node in ast.walk(scope):
-                if not isinstance(node, ast.Call):
-                    continue
-                if _redacted_ast(node) == shape:
-                    same_shape.append(node)
-            same_shape.sort(key=lambda n: (getattr(n, 'lineno', 0), getattr(n, 'col_offset', 0)))
-            slot = next((i for i, node in enumerate(same_shape) if node is target), 0)
+            calls = [
+                n for n in scope_data['calls']
+                if getattr(n, 'lineno', 0) <= int(lineno) <= getattr(n, 'end_lineno', getattr(n, 'lineno', 0))
+            ]
+            if calls:
+                target = min(
+                    calls,
+                    key=lambda n: (
+                        getattr(n, 'end_lineno', lineno) - getattr(n, 'lineno', lineno),
+                        len(ast.dump(n)),
+                    ),
+                )
+                shape = cached['shapes'][id(target)]
+                slot = scope_data['slots'].get(id(target), 0)
+                resolved = (shape, slot)
+            else:
+                resolved = None
+            cached['resolved'][resolved_key] = resolved
+
+        if resolved is not None:
+            shape, slot = resolved
             return f'{rel}:{func_name}:{kind}:{shape}:slot={slot}'
-
-        # Fallback for unusual wrappers where the executing line is not directly
-        # inside an ast.Call. Still excludes absolute path and line number.
         return f'{rel}:{func_name}:{kind}:no-call'
     except Exception:
         return f'{rel}:{func_name}:{kind}:parse-fallback'
@@ -223,16 +265,41 @@ def _possible_kinds_for_call(node: ast.Call) -> list[str]:
 
 
 def migrate_all_legacy_live_edit_settings() -> dict[str, int]:
-    """Eagerly migrate v1 live-edit text/sticker keys to stable v2 IDs.
+    """Migrate legacy live-edit keys to stable v2 IDs exactly once.
 
-    This runs at startup and is intentionally non-destructive: old keys are NEVER
-    deleted.  Eager migration matters because a page may not be visited between two
-    releases; if we waited for a lazy read, a later source edit could otherwise make
-    its v1 call-site hash impossible to reconstruct.
+    Safety/performance guarantees:
+    - Legacy keys are never deleted.
+    - All relevant settings are loaded in one SQLite read instead of thousands of
+      individual get_setting() calls.
+    - New stable keys and the completion marker are committed in one transaction.
+    - The completion marker is written only after a successful full scan, so a
+      crash/interruption causes the migration to retry safely on the next start.
+    - Once completed, subsequent bot restarts return immediately.
     """
+    marker_key = 'stable_live_edit_migration_v2_done'
+    if db.get_setting(marker_key, False):
+        return {'scanned': 0, 'texts': 0, 'stickers': 0, 'skipped': 1}
+
     migrated_text = 0
     migrated_stickers = 0
     scanned = 0
+
+    rows = db.fetchall(
+        "SELECT key, value FROM settings "
+        "WHERE key LIKE 'edit_text_override:%' "
+        "OR key LIKE 'edit_text_stickers:%' "
+        "OR key LIKE 'edit_text_migrated_from:%'"
+    )
+    settings_map: dict[str, Any] = {}
+    import json as _json
+    for row in rows:
+        raw = row.get('value')
+        try:
+            settings_map[str(row.get('key'))] = _json.loads(raw)
+        except Exception:
+            settings_map[str(row.get('key'))] = raw
+
+    pending: dict[str, Any] = {}
     roots = [_PROJECT_ROOT / 'modules', _PROJECT_ROOT]
     files: set[Path] = set()
     for root in roots:
@@ -268,21 +335,46 @@ def migrate_all_legacy_live_edit_settings() -> dict[str, int]:
                 stable = 'v2_' + hashlib.sha1(semantic.encode('utf-8')).hexdigest()[:24]
                 legacy = _legacy_key_for_line(str(path), lineno, func_name, kind)
                 _remember_legacy_text_key(stable, legacy)
-                new_text_key = f'edit_text_override:{stable}'
-                if db.get_setting(new_text_key, None) is None:
-                    old = db.get_setting(f'edit_text_override:{legacy}', None)
-                    if old is not None:
-                        db.set_setting(new_text_key, old)
-                        db.set_setting(f'edit_text_migrated_from:{stable}', legacy)
-                        migrated_text += 1
-                new_sticker_key = f'edit_text_stickers:{stable}'
-                if db.get_setting(new_sticker_key, None) is None:
-                    old_stickers = db.get_setting(f'edit_text_stickers:{legacy}', None)
-                    if old_stickers is not None:
-                        db.set_setting(new_sticker_key, old_stickers)
-                        migrated_stickers += 1
-    return {'scanned': scanned, 'texts': migrated_text, 'stickers': migrated_stickers}
 
+                new_text_key = f'edit_text_override:{stable}'
+                old_text_key = f'edit_text_override:{legacy}'
+                if new_text_key not in settings_map and new_text_key not in pending and old_text_key in settings_map:
+                    pending[new_text_key] = settings_map[old_text_key]
+                    pending[f'edit_text_migrated_from:{stable}'] = legacy
+                    migrated_text += 1
+
+                new_sticker_key = f'edit_text_stickers:{stable}'
+                old_sticker_key = f'edit_text_stickers:{legacy}'
+                if new_sticker_key not in settings_map and new_sticker_key not in pending and old_sticker_key in settings_map:
+                    pending[new_sticker_key] = settings_map[old_sticker_key]
+                    migrated_stickers += 1
+
+    import datetime as _datetime
+    timestamp = _datetime.datetime.utcnow().isoformat(timespec='seconds')
+    marker_value = {
+        'completed': True,
+        'scanned': scanned,
+        'texts': migrated_text,
+        'stickers': migrated_stickers,
+        'version': 2,
+        'completed_at': timestamp,
+    }
+    with db.connect() as conn:
+        for key, value in pending.items():
+            conn.execute(
+                """INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+                (key, _json.dumps(value, ensure_ascii=False), timestamp),
+            )
+        conn.execute(
+            """INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+            (marker_key, _json.dumps(marker_value, ensure_ascii=False), timestamp),
+        )
+        conn.commit()
+
+    db.clear_settings_cache()
+    return {'scanned': scanned, 'texts': migrated_text, 'stickers': migrated_stickers, 'skipped': 0}
 
 def set_dispatcher(dispatcher: Any) -> None:
     global _DISPATCHER

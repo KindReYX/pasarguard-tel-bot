@@ -150,6 +150,37 @@ if [ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]; then
   exit 7
 fi
 
+refresh_update_helpers() {
+  # Keep the root-owned launcher/worker in sync with the checked-out release.
+  # This matters because these files live outside the git worktree.
+  install -o root -g root -m 0755 "$PROJECT_DIR/scripts/apply_github_update.sh" /usr/local/libexec/pasarguard-apply-update
+  cat > /usr/local/sbin/pasarguard-bot-update <<EOFHELPER
+#!/usr/bin/env bash
+set -euo pipefail
+TAG="\${1:-}"
+if [[ ! "\$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then echo "Invalid version tag" >&2; exit 2; fi
+PROJECT_DIR='$PROJECT_DIR'
+SERVICE_NAME='$SERVICE_NAME'
+SERVICE_USER='$SERVICE_USER'
+UNIT="pasarguard-bot-update-\$(date +%s)"
+exec systemd-run --no-block --quiet --unit="\$UNIT" --collect --property=Type=oneshot \
+  --setenv=PROJECT_DIR="\$PROJECT_DIR" --setenv=SERVICE_NAME="\$SERVICE_NAME" --setenv=SERVICE_USER="\$SERVICE_USER" \
+  /usr/local/libexec/pasarguard-apply-update "\$TAG"
+EOFHELPER
+  chmod 0755 /usr/local/sbin/pasarguard-bot-update
+  chown root:root /usr/local/sbin/pasarguard-bot-update /usr/local/libexec/pasarguard-apply-update
+}
+
+refresh_update_helpers || {
+  echo "Failed to refresh updater helper files" >&2
+  run_as_service git -C "$PROJECT_DIR" reset --hard "$OLD_SHA"
+  restore_database_backup || true
+  if [ "$WAS_ACTIVE" -eq 1 ]; then systemctl start "$SERVICE_NAME" || true; fi
+  UPDATE_FINISHED=1
+  write_status failed "failed to refresh updater helper files"
+  exit 9
+}
+
 update_runtime() {
   if [ ! -x "$PROJECT_DIR/venv/bin/python" ]; then
     echo "venv is missing; run scripts/install_or_update.sh manually once" >&2

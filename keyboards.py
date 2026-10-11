@@ -11,6 +11,7 @@ BTN_USERS = '👥 کاربران'
 BTN_ORDERS = '🧾 سفارش‌ها'
 BTN_REPORTS = '📈 گزارش‌ها'
 BTN_PACKAGES = '📦 بسته‌ها'
+BTN_PRODUCTS = '🛍 محصولات'
 BTN_COUPONS = '🏷 کد تخفیف'
 BTN_WALLET = '💰 کیف پول'
 BTN_STARS = '⭐ پرداخت‌های Stars'
@@ -29,6 +30,7 @@ BTN_FORCE_JOIN = '🔐 جوین اجباری'
 BTN_ADVANCED_SETTINGS = '🧩 تنظیمات پیشرفته'
 BTN_REFERRAL = '👥 دعوت دوستان'
 BTN_TEST_SERVICE = '🧪 سرویس تست'
+BTN_TEST_SETTINGS = '🧪 تنظیمات بسته تست'
 BTN_SYSTEM_HEALTH = '🩺 وضعیت سیستم'
 BTN_SYSTEM_ERRORS = '🚨 خطاهای سیستم'
 BTN_PAYMENT_ENGINE = '🧾 موتور پرداخت'
@@ -258,12 +260,13 @@ def _kb(text: str, detail_id: str | None = None) -> KeyboardButton:
 def main_admin_keyboard(role: str) -> ReplyKeyboardMarkup:
     rows = [
         [_kb(BTN_DASHBOARD)],
-        [_kb(BTN_USERS), _kb(BTN_PACKAGES)],
+        [_kb(BTN_USERS), _kb(BTN_PRODUCTS)],
         [_kb(BTN_ORDERS), _kb(BTN_REPORTS)],
         [_kb(BTN_BROADCAST), _kb(BTN_TICKETS)],
         [_kb(BTN_COUPONS), _kb(BTN_WALLET)],
         [_kb(BTN_STARS)],
-        [_kb(BTN_SETTINGS), _kb(BTN_EDIT_MODE)],
+        [_kb(BTN_SETTINGS), _kb(BTN_TEST_SETTINGS)],
+        [_kb(BTN_EDIT_MODE)],
         [_kb(BTN_MAINTENANCE), _kb(BTN_EXPORTS)],
         [_kb(BTN_NOTIFICATIONS), _kb(BTN_FORCE_JOIN)],
         [_kb(BTN_ADVANCED_SETTINGS), _kb(BTN_REFERRAL)],
@@ -278,7 +281,7 @@ def main_admin_keyboard(role: str) -> ReplyKeyboardMarkup:
     elif role == 'seller':
         rows = [
             [_kb(BTN_DASHBOARD)],
-            [_kb(BTN_USERS), _kb(BTN_PACKAGES)],
+            [_kb(BTN_USERS), _kb(BTN_PRODUCTS)],
             [_kb(BTN_TICKETS), _kb(BTN_NOTIFICATIONS)],
             [_kb(BTN_REFERRAL), _kb(BTN_SELLER_PANEL)],
         ]

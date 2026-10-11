@@ -701,7 +701,7 @@ BUTTON_DETAIL_GROUPS: dict[str, tuple[str, list[tuple[str, str]]]] = {
     'admin': ('🛡 پنل ادمین', [
         ('admin_dashboard', 'داشبورد'), ('admin_users', 'کاربران'), ('admin_packages', 'بسته ها'), ('admin_orders', 'سفارش ها'),
         ('admin_reports', 'گزارش ها'), ('admin_broadcast', 'پیام همگانی'), ('admin_tickets', 'تیکت ها'), ('admin_coupons', 'کد تخفیف'),
-        ('admin_wallet', 'کیف پول ادمین'), ('admin_stars', 'پرداخت های Stars'), ('admin_texts', 'متن های ربات'), ('admin_settings', 'تنظیمات'),
+        ('admin_wallet', 'کیف پول ادمین'), ('admin_stars', 'پرداخت های Stars'), ('admin_texts', 'متن های ربات'), ('admin_settings', 'تنظیمات'), ('admin_test_settings', 'تنظیمات بسته تست'),
         ('admin_maintenance', 'حالت تعمیر'), ('admin_exports', 'خروجی اکسل'), ('admin_notifications', 'اعلان ها'), ('admin_force_join', 'جوین اجباری'),
         ('admin_advanced', 'تنظیمات پیشرفته'), ('admin_referral', 'دعوت دوستان ادمین'), ('admin_health', 'وضعیت سیستم'), ('admin_payment_engine', 'موتور پرداخت'),
         ('admin_errors', 'خطاهای سیستم'), ('admin_seller', 'پنل فروشنده'), ('admin_card_receipts', 'فیش های کارت به کارت'),
@@ -802,7 +802,7 @@ def button_detail_id(text: str | None = None, callback_data: str | None = None, 
         'داشبورد':'admin_dashboard','کاربران':'admin_users','بسته':'admin_packages','سفارش':'admin_orders','گزارش':'admin_reports',
         'پیام همگانی':'admin_broadcast','تیکت':'admin_tickets','کد تخفیف':'admin_coupons','پرداخت های Stars':'admin_stars',
         'پرداخت‌های Stars':'admin_stars','متن های ربات':'admin_texts','متن‌های ربات':'admin_texts','تنظیمات پیشرفته':'admin_advanced',
-        'تنظیمات':'admin_settings','حالت تعمیر':'admin_maintenance','خروجی اکسل':'admin_exports','اعلان':'admin_notifications',
+        'تنظیمات بسته تست':'admin_test_settings','تنظیمات':'admin_settings','حالت تعمیر':'admin_maintenance','خروجی اکسل':'admin_exports','اعلان':'admin_notifications',
         'جوین اجباری':'admin_force_join','وضعیت سیستم':'admin_health','موتور پرداخت':'admin_payment_engine','خطاهای سیستم':'admin_errors',
         'پنل فروشنده':'admin_seller','فیش های کارت به کارت':'admin_card_receipts','مدیریت ادمین':'admin_admins','لاگ ادمین':'admin_logs',
         'بکاپ':'admin_backup','کمپین':'admin_campaigns','کیف پول':'admin_wallet','دعوت دوستان':'admin_referral','مدیریت آموزش':'admin_tutorials',
@@ -1483,7 +1483,13 @@ def install_edit_mode_output_patch() -> None:
         if text is None or edit_runtime.is_editor_internal_call():
             if text is not None:
                 text = await render_custom_emoji_plain(getattr(self, 'bot', None), text)
-            return await original_callback_answer(self, text, *args, **kwargs)
+            try:
+                return await original_callback_answer(self, text, *args, **kwargs)
+            except TelegramBadRequest as exc:
+                msg = str(exc).lower()
+                if 'query is too old' in msg or 'query id is invalid' in msg or 'response timeout expired' in msg:
+                    return None
+                raise
 
         # Callback toasts/alerts cannot physically contain an inline keyboard. In edit
         # mode we therefore keep the real Telegram alert AND send one mirror message
@@ -1493,7 +1499,13 @@ def install_edit_mode_output_patch() -> None:
         override = edit_runtime.get_text_override(stable)
         final_text = edit_runtime.render_simple_template(str(override), variables) if override is not None else str(text or '')
         final_text = await render_custom_emoji_plain(getattr(self, 'bot', None), final_text)
-        result = await original_callback_answer(self, final_text, *args, **kwargs)
+        try:
+            result = await original_callback_answer(self, final_text, *args, **kwargs)
+        except TelegramBadRequest as exc:
+            msg = str(exc).lower()
+            if 'query is too old' in msg or 'query id is invalid' in msg or 'response timeout expired' in msg:
+                return None
+            raise
 
         chat_id = getattr(getattr(self, 'message', None), 'chat', None)
         chat_id = getattr(chat_id, 'id', None)

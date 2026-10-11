@@ -14,16 +14,41 @@ if ! id "$SERVICE_USER" >/dev/null 2>&1; then
 fi
 cd "$PROJECT_DIR"
 echo "[1/7] Safe pre-update database backup"
-python3 scripts/db_backup.py || { echo "Backup failed; update aborted."; exit 1; }
+BACKUP_OUTPUT="$(python3 scripts/db_backup.py)" || { echo "Backup failed; update aborted."; exit 1; }
+printf '%s
+' "$BACKUP_OUTPUT"
+BACKUP_PATH="$(printf '%s
+' "$BACKUP_OUTPUT" | tail -n 1)"
+if [ -n "$BACKUP_PATH" ] && [ ! -f "$BACKUP_PATH" ]; then BACKUP_PATH=""; fi
 echo "[2/7] Stop service"
 WAS_ACTIVE=0
 if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then WAS_ACTIVE=1; fi
 systemctl stop "$SERVICE_NAME" 2>/dev/null || true
 FAILED=1
+restore_preupdate_db() {
+  [ -n "${BACKUP_PATH:-}" ] || return 0
+  local db_path
+  db_path="$(grep -E '^DB_PATH=' "$PROJECT_DIR/.env" | tail -1 | cut -d= -f2- || true)"
+  db_path="${db_path:-bot.db}"
+  case "$db_path" in /*) ;; *) db_path="$PROJECT_DIR/$db_path" ;; esac
+  python3 - "$BACKUP_PATH" <<'PYRESTORE'
+import sqlite3, sys
+p=sys.argv[1]
+c=sqlite3.connect(p); r=c.execute('PRAGMA integrity_check').fetchone(); c.close()
+if not r or str(r[0]).lower() != 'ok': raise SystemExit(f'backup integrity failed: {r}')
+PYRESTORE
+  cp -f "$BACKUP_PATH" "$db_path"
+  rm -f "${db_path}-wal" "${db_path}-shm"
+  chown "$SERVICE_USER:$(id -gn "$SERVICE_USER")" "$db_path" 2>/dev/null || true
+}
 cleanup() {
-  if [ "$FAILED" -ne 0 ] && [ "$WAS_ACTIVE" -eq 1 ]; then
-    echo "Update failed; trying to start service again with current files..."
-    systemctl start "$SERVICE_NAME" 2>/dev/null || true
+  if [ "$FAILED" -ne 0 ]; then
+    echo "Update failed; restoring pre-update database snapshot..."
+    restore_preupdate_db || true
+    if [ "$WAS_ACTIVE" -eq 1 ]; then
+      echo "Trying to start service again with current files..."
+      systemctl start "$SERVICE_NAME" 2>/dev/null || true
+    fi
   fi
 }
 trap cleanup EXIT

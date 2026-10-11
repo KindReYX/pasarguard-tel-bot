@@ -26,25 +26,25 @@ def format_toman(amount: int | None) -> str:
 
 
 def referral_admin_keyboard() -> InlineKeyboardMarkup:
-    condition = db.get_setting('referral_condition', 'payment')
+    condition = db.referral_condition()
     enabled = bool(db.get_setting('referral_enabled', True))
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"وضعیت دعوت: {'روشن' if enabled else 'خاموش'}", callback_data='ref_admin:toggle')],
         [InlineKeyboardButton(text='💰 تنظیم پاداش دعوت', callback_data='ref_admin:reward')],
-        [InlineKeyboardButton(text=f"شرط پاداش: {'بعد از پرداخت' if condition == 'payment' else 'فقط ورود با لینک'}", callback_data='ref_admin:condition')],
+        [InlineKeyboardButton(text=f"شرط پاداش: {'بعد از خرید موفق بسته' if condition == 'purchase' else 'فقط ورود با لینک'}", callback_data='ref_admin:condition')],
         [InlineKeyboardButton(text='📊 آمار دعوت ها', callback_data='ref_admin:stats')],
     ])
 
 
 async def referral_admin_home_message(message: Message) -> None:
-    reward = int(db.get_setting('referral_reward_toman', 0) or 0)
-    condition = db.get_setting('referral_condition', 'payment')
+    reward = db.referral_reward_amount()
+    condition = db.referral_condition()
     enabled = bool(db.get_setting('referral_enabled', True))
     await message.answer('👥 تنظیمات دعوت دوستان', reply_markup=back_keyboard())
     await message.answer(
         f"وضعیت: {'روشن' if enabled else 'خاموش'}\n"
         f'پاداش هر دعوت: {format_toman(reward)}\n'
-        f"شرط پاداش: {'بعد از پرداخت دعوت شده' if condition == 'payment' else 'صرفا ورود با لینک دعوت'}",
+        f"شرط پاداش: {'بعد از خرید موفق بسته' if condition == 'purchase' else 'صرفا ورود با لینک دعوت'}",
         reply_markup=referral_admin_keyboard(),
     )
 
@@ -60,9 +60,9 @@ async def referral_menu(message: Message, bot):
         return
     stats = db.referral_stats(user_id)
     me = await bot.get_me()
-    reward = int(db.get_setting('referral_reward_toman', 0) or 0)
-    condition = db.get_setting('referral_condition', 'payment')
-    condition_text = 'بعد از پرداخت دعوت شده' if condition == 'payment' else 'بعد از ورود با لینک'
+    reward = db.referral_reward_amount()
+    condition = db.referral_condition()
+    condition_text = 'بعد از خرید موفق بسته' if condition == 'purchase' else 'بعد از ورود با لینک'
     link = f'https://t.me/{me.username}?start=ref_{user_id}'
     await message.answer(
         '👥 دعوت دوستان\n\n'
@@ -92,10 +92,10 @@ async def referral_condition(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
         await deny_callback(callback)
         return
-    current = db.get_setting('referral_condition', 'payment')
-    new = 'join' if current == 'payment' else 'payment'
+    current = db.referral_condition()
+    new = 'join' if current == 'purchase' else 'purchase'
     db.set_setting('referral_condition', new)
-    await edit_or_answer(callback, f"شرط پاداش تغییر کرد: {'صرفا ورود با لینک' if new == 'join' else 'بعد از پرداخت دعوت شده'}", reply_markup=referral_admin_keyboard())
+    await edit_or_answer(callback, f"شرط پاداش تغییر کرد: {'صرفا ورود با لینک' if new == 'join' else 'بعد از خرید موفق بسته'}", reply_markup=referral_admin_keyboard())
     await answer_callback(callback)
 
 
@@ -118,6 +118,7 @@ async def referral_reward_finish(message: Message, state: FSMContext):
         await message.answer('لطفا عدد معتبر وارد کنید.')
         return
     db.set_setting('referral_reward_toman', int(raw))
+    db.set_setting('referral_reward_amount', int(raw))
     await state.clear()
     await message.answer(f'پاداش دعوت ثبت شد: {format_toman(int(raw))}', reply_markup=back_keyboard())
     await referral_admin_home_message(message)

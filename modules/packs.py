@@ -10,7 +10,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, C
 
 import api_client
 import db
-from utils import edit_or_answer
+from utils import edit_or_answer, answer_callback
 from keyboards import EditableButtonFilter
 from keyboards import BTN_PACKAGES, back_keyboard
 from permissions import can_manage_packs, can_view_packs, deny_message, deny_callback
@@ -30,6 +30,9 @@ class PackStates(StatesGroup):
     edit_groups = State()
     price_value = State()
     bulk_price_percent = State()
+
+def pack_create_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⬅️ بازگشت', callback_data='pack:create_cancel')]])
 
 
 def parse_bytes(text: str) -> int:
@@ -87,6 +90,39 @@ def parse_username_affix(text: str) -> str:
     return value
 
 
+def pack_volume_gb(pack: dict | None) -> Decimal:
+    if not pack:
+        return Decimal('0')
+    try:
+        raw = Decimal(str(pack.get('data_limit') or 0))
+    except Exception:
+        return Decimal('0')
+    if raw <= 0:
+        return Decimal('0')
+    return raw / Decimal(1024 ** 3)
+
+
+def public_price_for_pack(product_id: int | str | None, pack: dict | None) -> int:
+    if not product_id:
+        return 0
+    row = db.fetchone('SELECT public_price_amount FROM products WHERE id=?', (int(product_id),)) or {}
+    per_gb = int(row.get('public_price_amount') or 0)
+    if per_gb <= 0:
+        return 0
+    gb = pack_volume_gb(pack)
+    if gb <= 0:
+        return 0
+    return int((gb * Decimal(per_gb)).quantize(Decimal('1'), rounding=ROUND_HALF_UP))
+
+
+def effective_pack_price(meta: dict, pack: dict | None = None) -> int:
+    if int(meta.get('use_product_price') or 0) and meta.get('product_id'):
+        public_total = public_price_for_pack(meta.get('product_id'), pack)
+        if public_total > 0:
+            return public_total
+    return int(meta.get('price_amount') or 0)
+
+
 def format_price(amount: int | None, currency: str = 'TOMAN') -> str:
     amount = int(amount or 0)
     return f'{amount:,} تومان'
@@ -110,6 +146,7 @@ def upsert_pack_meta(
     price_currency: str = 'TOMAN',
     is_visible: int | None = None,
     sort_order: int | None = None,
+    use_product_price: int | None = None,
 ) -> None:
     current = get_pack_meta(str(template_id))
     if price_amount is None:
@@ -118,17 +155,20 @@ def upsert_pack_meta(
         is_visible = int(current.get('is_visible', 1))
     if sort_order is None:
         sort_order = int(current.get('sort_order', 1000))
+    if use_product_price is None:
+        use_product_price = int(current.get('use_product_price') or 0)
     db.execute(
         '''INSERT INTO package_settings
-           (template_id, price_amount, price_currency, is_visible, sort_order, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?)
+           (template_id, price_amount, price_currency, is_visible, sort_order, use_product_price, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(template_id) DO UPDATE SET
              price_amount=excluded.price_amount,
              price_currency=excluded.price_currency,
              is_visible=excluded.is_visible,
              sort_order=excluded.sort_order,
+             use_product_price=excluded.use_product_price,
              updated_at=excluded.updated_at''',
-        (str(template_id), int(price_amount), price_currency, int(is_visible), int(sort_order), db.now_iso()),
+        (str(template_id), int(price_amount), price_currency, int(is_visible), int(sort_order), int(use_product_price), db.now_iso()),
     )
 
 
@@ -150,7 +190,7 @@ def list_keyboard(packs: list[dict], can_manage: bool) -> InlineKeyboardMarkup:
         pid = str(pack.get('id'))
         meta = local.get(pid, {})
         eye = '👁' if meta.get('is_visible', 1) else '🙈'
-        price = format_price(meta.get('price_amount', 0), meta.get('price_currency', 'TOMAN'))
+        price = format_price(effective_pack_price(meta, pack), meta.get('price_currency', 'TOMAN'))
         rows.append([InlineKeyboardButton(text=f'{eye} {pack_title(pack)} | {price}', callback_data=f'pack:view:{pid}')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -158,14 +198,16 @@ def list_keyboard(packs: list[dict], can_manage: bool) -> InlineKeyboardMarkup:
 def detail_text(pack: dict) -> str:
     template_id = str(pack.get('id'))
     meta = get_pack_meta(template_id)
-    price = format_price(meta.get('price_amount', 0), meta.get('price_currency', 'TOMAN'))
+    price = format_price(effective_pack_price(meta, pack), meta.get('price_currency', 'TOMAN'))
+    price_mode = 'قیمت عمومی هر گیگ × حجم بسته' if int(meta.get('use_product_price') or 0) else 'قیمت اختصاصی'
     visible = 'بله' if meta.get('is_visible', 1) else 'خیر'
     return (
         '📦 جزئیات بسته\n\n'
         f'ID: {pack.get("id")}\n'
         f'نام: {pack.get("name")}\n'
-        f'قیمت فروش: {price}\n'
-        f'نمایش در ربات: {visible}\n'
+        f'قیمت فروش: {price} ({price_mode})\n'
+        + (f"قیمت عمومی هر گیگ: {int((db.fetchone('SELECT public_price_amount FROM products WHERE id=?', (int(meta.get('product_id')),)) or {}).get('public_price_amount') or 0):,} تومان\n" if int(meta.get('use_product_price') or 0) and meta.get('product_id') else '')
+        + f'نمایش در ربات: {visible}\n'
         f'ترتیب نمایش: {meta.get("sort_order", 1000)}\n'
         f'پیش از نام: {pack.get("username_prefix") or "ندارد"}\n'
         f'پس از نام: {pack.get("username_suffix") or "ندارد"}\n\n'
@@ -179,17 +221,21 @@ def detail_text(pack: dict) -> str:
 
 
 def detail_keyboard(template_id: str, can_manage: bool) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text='🔙 لیست بسته‌ها', callback_data='pack:list')]]
+    meta = get_pack_meta(template_id)
+    product_id = meta.get('product_id')
+    back_cb = f'product:packs:{int(product_id)}' if product_id else 'product:list'
+    back_text = '🔙 بسته‌های محصول' if product_id else '🔙 محصولات'
+    rows = [[InlineKeyboardButton(text=back_text, callback_data=back_cb)]]
     if can_manage:
         rows = [
-            [InlineKeyboardButton(text='💰 قیمت', callback_data=f'pack:price:{template_id}')],
+            [InlineKeyboardButton(text='💰 قیمت', callback_data=f'pack:price:{template_id}'), InlineKeyboardButton(text='🔗 قیمت عمومی', callback_data=f'pack:public_price:{template_id}')],
             [InlineKeyboardButton(text='✏️ نام', callback_data=f'pack:edit:{template_id}:name'), InlineKeyboardButton(text='📦 حجم', callback_data=f'pack:edit:{template_id}:data_limit')],
             [InlineKeyboardButton(text='⏳ مدت', callback_data=f'pack:edit:{template_id}:expire_duration'), InlineKeyboardButton(text='👥 گروه‌ها', callback_data=f'pack:edit:{template_id}:group_ids')],
             [InlineKeyboardButton(text='⬅️ پیش از نام', callback_data=f'pack:edit:{template_id}:username_prefix'), InlineKeyboardButton(text='➡️ پس از نام', callback_data=f'pack:edit:{template_id}:username_suffix')],
             [InlineKeyboardButton(text='👁 نمایش/عدم نمایش', callback_data=f'pack:visible:{template_id}')],
             [InlineKeyboardButton(text='⬆️ بالا', callback_data=f'pack:sort:{template_id}:-1'), InlineKeyboardButton(text='⬇️ پایین', callback_data=f'pack:sort:{template_id}:1')],
             [InlineKeyboardButton(text='🗑 حذف', callback_data=f'pack:delete:{template_id}')],
-            [InlineKeyboardButton(text='🔙 لیست بسته‌ها', callback_data='pack:list')],
+            [InlineKeyboardButton(text=back_text, callback_data=back_cb)],
         ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -204,13 +250,16 @@ def group_keyboard(groups: list[dict], selected: list[int], mode: str, template_
         rows.append([InlineKeyboardButton(text=f'{mark} {group.get("name")}', callback_data=cb)])
     rows.append([InlineKeyboardButton(text='✅ انتخاب تمام گروه‌ها', callback_data='pack:g:create_all' if mode == 'create' else f'pack:g:edit_all:{template_id}')])
     rows.append([InlineKeyboardButton(text='☑️ تایید گروه‌ها', callback_data='pack:g:create_done' if mode == 'create' else f'pack:g:edit_done:{template_id}')])
+    rows.append([InlineKeyboardButton(text='⬅️ بازگشت', callback_data='pack:create_cancel' if mode == 'create' else f'pack:view:{template_id}')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def list_packs_message(message: Message):
-    packs = await api_client.get_user_templates()
-    await message.answer('📦 بسته‌ها', reply_markup=back_keyboard())
-    await message.answer('لیست بسته‌ها:', reply_markup=list_keyboard(packs, can_manage_packs(message.from_user.id if message.from_user else None)))
+    # The public admin entry is Products now; keep this helper as a compatibility
+    # redirect for stale keyboards and old callbacks.
+    from modules.products import product_keyboard
+    await message.answer('🛍 محصولات', reply_markup=back_keyboard())
+    await message.answer('محصولات و دسته‌بندی بسته‌ها:', reply_markup=product_keyboard())
 
 
 @packs_router.message(EditableButtonFilter(BTN_PACKAGES))
@@ -227,8 +276,8 @@ async def packs_list(callback: CallbackQuery):
     if not can_view_packs(callback.from_user.id):
         await deny_callback(callback)
         return
-    packs = await api_client.get_user_templates()
-    await edit_or_answer(callback, '📦 بسته‌ها', reply_markup=list_keyboard(packs, can_manage_packs(callback.from_user.id)))
+    from modules.products import product_keyboard
+    await edit_or_answer(callback, '🛍 محصولات', reply_markup=product_keyboard())
     await callback.answer()
 
 
@@ -238,9 +287,20 @@ async def pack_view(callback: CallbackQuery):
         await deny_callback(callback)
         return
     template_id = callback.data.split(':')[-1]
-    pack = await api_client.get_user_template(template_id)
+    await answer_callback(callback, '⏳ در حال بارگذاری جزئیات…')
+    try:
+        pack = await api_client.get_user_template(template_id)
+    except Exception:
+        await edit_or_answer(
+            callback,
+            '⚠️ دریافت جزئیات بسته از پنل طول کشید یا ناموفق بود.',
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text='🔄 تلاش دوباره', callback_data=f'pack:view:{template_id}')],
+                [InlineKeyboardButton(text='⬅️ بازگشت', callback_data='pack:list')],
+            ]),
+        )
+        return
     await edit_or_answer(callback, detail_text(pack), reply_markup=detail_keyboard(template_id, can_manage_packs(callback.from_user.id)))
-    await callback.answer()
 
 
 @packs_router.callback_query(F.data == 'pack:create')
@@ -250,7 +310,7 @@ async def pack_create_start(callback: CallbackQuery, state: FSMContext):
         return
     await state.set_state(PackStates.create_value)
     await state.update_data(step=0, payload={}, price_amount=None)
-    await callback.message.answer('نام بسته را وارد کنید:')
+    await callback.message.answer('نام بسته را وارد کنید:', reply_markup=pack_create_back_keyboard())
     await callback.answer()
 
 
@@ -261,7 +321,29 @@ async def pack_create_value(message: Message, state: FSMContext):
     data = await state.get_data()
     step = data.get('step', 0)
     payload = data.get('payload', {})
-    field = STEPS[step]
+
+    # Only the first four STEPS are text-input stages. group_ids is selected
+    # via inline callbacks. Older/interrupted FSM data could leave step=4 while
+    # still in create_value; recover instead of indexing past the input stages.
+    input_steps = STEPS[:-1]
+    if not isinstance(step, int) or step < 0:
+        step = 0
+        await state.update_data(step=0)
+    if step >= len(input_steps):
+        await state.set_state(PackStates.create_groups)
+        try:
+            groups = await api_client.get_groups()
+        except Exception:
+            await message.answer(
+                'اطلاعات مراحل ساخت بسته حفظ شده ✅\n'
+                'اما دریافت گروه‌های پنل موقتاً خطا داد. دوباره تلاش کنید:',
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔄 تلاش دوباره برای گروه‌ها', callback_data='pack:g:create_load')],[InlineKeyboardButton(text='⬅️ بازگشت', callback_data='pack:create_cancel')]]),
+            )
+            return
+        await message.answer('گروه‌ها را انتخاب کنید:', reply_markup=group_keyboard(groups, data.get('selected_groups', []), 'create'))
+        return
+
+    field = input_steps[step]
     try:
         if field == 'name':
             value = (message.text or '').strip()
@@ -269,27 +351,72 @@ async def pack_create_value(message: Message, state: FSMContext):
                 raise ValueError('نام بسته نمی‌تواند خالی باشد.')
             payload[field] = value
         elif field == 'price_amount':
-            await state.update_data(price_amount=parse_price(message.text or ''), step=step + 1, payload=payload)
+            price_amount = parse_price(message.text or '')
+            await state.update_data(price_amount=price_amount, payload=payload)
         elif field == 'data_limit':
             payload[field] = parse_bytes(message.text or '')
         elif field == 'expire_duration':
             payload[field] = parse_duration(message.text or '')
-        if field != 'price_amount':
-            await state.update_data(payload=payload, step=step + 1)
+
+        next_step = step + 1
+        if next_step == len(input_steps):
+            # Change FSM state first so a duplicate/fast second message cannot
+            # observe create_value together with terminal step=4.
+            await state.set_state(PackStates.create_groups)
+            await state.update_data(payload=payload, step=next_step, selected_groups=[])
+        else:
+            await state.update_data(payload=payload, step=next_step)
     except Exception as exc:
-        await message.answer(f'خطا: {exc}')
+        await message.answer(f'خطا: {exc}', reply_markup=pack_create_back_keyboard())
         return
-    next_step = step + 1
+
     if next_step == 1:
-        await message.answer('قیمت بسته را به تومان وارد کنید. مثال: 90000')
+        await message.answer('قیمت بسته را به تومان وارد کنید. مثال: 90000', reply_markup=pack_create_back_keyboard())
     elif next_step == 2:
-        await message.answer('حجم بسته را وارد کنید. مثال: 50GB')
+        await message.answer('حجم بسته را وارد کنید. مثال: 50GB', reply_markup=pack_create_back_keyboard())
     elif next_step == 3:
-        await message.answer('مدت اعتبار را وارد کنید. مثال: 30d یا 30 روز')
+        await message.answer('مدت اعتبار را وارد کنید. مثال: 30d یا 30 روز', reply_markup=pack_create_back_keyboard())
     elif next_step == 4:
-        groups = await api_client.get_groups()
-        await state.set_state(PackStates.create_groups)
+        # State was already switched before step=4 was persisted. Now loading
+        # panel groups is safe even with duplicate/very fast user messages.
+        try:
+            groups = await api_client.get_groups()
+        except Exception as exc:
+            await message.answer(
+                'مدت بسته ثبت شد ✅\n'
+                'اما دریافت گروه‌های پنل موقتاً خطا داد. دوباره تلاش کنید:',
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔄 تلاش دوباره برای گروه‌ها', callback_data='pack:g:create_load')],[InlineKeyboardButton(text='⬅️ بازگشت', callback_data='pack:create_cancel')]]),
+            )
+            return
         await message.answer('گروه‌ها را انتخاب کنید:', reply_markup=group_keyboard(groups, [], 'create'))
+
+
+@packs_router.callback_query(F.data == 'pack:create_cancel')
+async def pack_create_cancel(callback: CallbackQuery, state: FSMContext):
+    data=await state.get_data(); pid=int(data.get('product_id') or 0); await state.clear()
+    from modules.products import product_pack_keyboard, product_keyboard
+    if pid:
+        await edit_or_answer(callback,'📦 بسته‌های این محصول',reply_markup=await product_pack_keyboard(pid))
+    else:
+        await edit_or_answer(callback,'🛍 محصولات',reply_markup=product_keyboard())
+    await callback.answer('برگشتیم')
+
+
+@packs_router.callback_query(F.data == 'pack:g:create_load')
+async def pack_create_groups_load(callback: CallbackQuery, state: FSMContext):
+    if not can_manage_packs(callback.from_user.id):
+        await deny_callback(callback)
+        return
+    data = await state.get_data()
+    try:
+        groups = await api_client.get_groups()
+    except Exception:
+        await callback.answer('هنوز ارتباط با گروه‌های پنل برقرار نشد. دوباره امتحان کنید.', show_alert=True)
+        return
+    await state.set_state(PackStates.create_groups)
+    selected = data.get('selected_groups', [])
+    await edit_or_answer(callback, 'گروه‌ها را انتخاب کنید:', reply_markup=group_keyboard(groups, selected, 'create'))
+    await callback.answer()
 
 
 @packs_router.callback_query(F.data.startswith('pack:g:create:'))
@@ -331,7 +458,14 @@ async def pack_create_done(callback: CallbackQuery, state: FSMContext):
     payload.setdefault('data_limit_reset_strategy', 'no_reset')
     pack = await api_client.create_user_template(payload)
     template_id = str(pack.get('id'))
-    upsert_pack_meta(template_id, price_amount=int(price_amount))
+    product_id = data.get('product_id')
+    use_public = 0
+    if product_id:
+        prow = db.fetchone('SELECT public_price_amount FROM products WHERE id=?', (int(product_id),)) or {}
+        use_public = 1 if int(prow.get('public_price_amount') or 0) > 0 else 0
+    upsert_pack_meta(template_id, price_amount=int(price_amount), use_product_price=use_public)
+    if product_id:
+        db.execute('UPDATE package_settings SET product_id=?, use_product_price=?, updated_at=? WHERE template_id=?', (int(product_id), use_public, db.now_iso(), template_id))
     db.add_log(callback.from_user.id, 'create_pack', 'pack', template_id, {**payload, 'price_amount': price_amount})
     await state.clear()
     fresh = await api_client.get_user_template(template_id)
@@ -377,7 +511,7 @@ async def pack_price_value(message: Message, state: FSMContext):
         pack = await api_client.get_user_template(template_id)
         await message.answer('قیمت بسته ویرایش شد.\n\n' + detail_text(pack), reply_markup=detail_keyboard(template_id, True))
     except Exception as exc:
-        await message.answer(f'خطا: {exc}')
+        await message.answer(f'خطا: {exc}', reply_markup=pack_create_back_keyboard())
 
 
 @packs_router.callback_query(F.data.startswith('pack:bulk_price:'))
@@ -450,7 +584,7 @@ async def bulk_price_percent_value(message: Message, state: FSMContext):
         )
         await list_packs_message(message)
     except Exception as exc:
-        await message.answer(f'خطا: {exc}')
+        await message.answer(f'خطا: {exc}', reply_markup=pack_create_back_keyboard())
 
 
 @packs_router.callback_query(F.data.startswith('pack:edit:'))
@@ -504,7 +638,7 @@ async def pack_edit_value(message: Message, state: FSMContext):
         await state.clear()
         await message.answer('ویرایش شد.\n\n' + detail_text(updated), reply_markup=detail_keyboard(str(template_id), True))
     except Exception as exc:
-        await message.answer(f'خطا: {exc}')
+        await message.answer(f'خطا: {exc}', reply_markup=pack_create_back_keyboard())
 
 
 @packs_router.callback_query(F.data.startswith('pack:g:edit:'))
@@ -549,6 +683,21 @@ async def pack_edit_group_done(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
+
+@packs_router.callback_query(F.data.startswith('pack:public_price:'))
+async def pack_public_price_toggle(callback: CallbackQuery):
+    if not can_manage_packs(callback.from_user.id):
+        await deny_callback(callback); return
+    template_id = callback.data.split(':')[-1]
+    meta = get_pack_meta(template_id)
+    if not meta.get('product_id'):
+        await callback.answer('این بسته به محصولی وصل نیست.', show_alert=True); return
+    new_value = 0 if int(meta.get('use_product_price') or 0) else 1
+    upsert_pack_meta(template_id, use_product_price=new_value)
+    pack = await api_client.get_user_template(template_id)
+    await edit_or_answer(callback, detail_text(pack), reply_markup=detail_keyboard(template_id, True))
+    await callback.answer('از این پس قیمت بسته از قیمت عمومی هر گیگ × حجم محاسبه می‌شود.' if new_value else 'قیمت اختصاصی بسته فعال شد.')
+
 @packs_router.callback_query(F.data.startswith('pack:visible:'))
 async def pack_visible(callback: CallbackQuery):
     if not can_manage_packs(callback.from_user.id):
@@ -585,7 +734,19 @@ async def pack_sort(callback: CallbackQuery):
         is_visible=int(meta.get('is_visible', 1)),
         sort_order=order,
     )
-    await packs_list(callback)
+    product_id = meta.get('product_id')
+    if product_id:
+        from modules.products import product_pack_keyboard
+        await edit_or_answer(callback, '📦 بسته‌های این محصول', reply_markup=await product_pack_keyboard(int(product_id)))
+        await callback.answer()
+    else:
+        await products_fallback(callback)
+
+
+async def products_fallback(callback: CallbackQuery):
+    from modules.products import product_keyboard
+    await edit_or_answer(callback, '🛍 محصولات', reply_markup=product_keyboard())
+    await callback.answer()
 
 
 @packs_router.callback_query(F.data.startswith('pack:delete:'))
@@ -607,7 +768,15 @@ async def pack_delete(callback: CallbackQuery):
         await deny_callback(callback)
         return
     template_id = callback.data.split(':')[-1]
+    meta = get_pack_meta(template_id)
+    product_id = meta.get('product_id')
     await api_client.delete_user_template(template_id)
+    db.execute('DELETE FROM product_test_templates WHERE template_id=?', (template_id,))
     db.execute('DELETE FROM package_settings WHERE template_id=?', (template_id,))
     db.add_log(callback.from_user.id, 'delete_pack', 'pack', template_id)
-    await packs_list(callback)
+    if product_id:
+        from modules.products import product_pack_keyboard
+        await edit_or_answer(callback, 'بسته حذف شد.\n\n📦 بسته‌های این محصول', reply_markup=await product_pack_keyboard(int(product_id)))
+        await callback.answer()
+    else:
+        await products_fallback(callback)

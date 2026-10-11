@@ -207,34 +207,117 @@ async def get_user_templates() -> list[dict]:
             return cached
     except Exception:
         pass
-    data = await request('GET', '/api/user_templates/simple', params={'all': 'true'})
-    templates = data.get('templates', []) if isinstance(data, dict) else []
+    try:
+        data = await request('GET', '/api/user_templates/simple', params={'all': 'true'})
+        templates = data.get('templates', []) if isinstance(data, dict) else []
+    except Exception:
+        # Keep the admin/customer UI usable during a temporary slow panel.
+        # The last successful list is deliberately cached much longer than the
+        # normal freshness cache and is only used as a fallback.
+        try:
+            stale = db.cache_get('panel:user_templates:last_good')
+            if isinstance(stale, list):
+                _l1_set('panel:user_templates:simple', stale, 10)
+                return stale
+        except Exception:
+            pass
+        raise
     try:
         import db
         db.cache_set('panel:user_templates:simple', templates, 60)
+        db.cache_set('panel:user_templates:last_good', templates, 7 * 24 * 3600)
         _l1_set('panel:user_templates:simple', templates, 20)
     except Exception:
         pass
     return templates
 
 
-async def get_user_template(template_id: str | int) -> dict:
-    data = await request('GET', f'/api/user_template/{template_id}')
-    if not isinstance(data, dict):
-        raise RuntimeError('Invalid template response')
+async def get_user_template(template_id: str | int, *, force: bool = False) -> dict:
+    tid = str(template_id)
+    key = f'panel:user_template:{tid}'
+    stale_key = f'{key}:last_good'
+    if not force:
+        l1 = _l1_get(key)
+        if isinstance(l1, dict):
+            return l1
+        try:
+            cached = db.cache_get(key)
+            if isinstance(cached, dict):
+                _l1_set(key, cached, 60)
+                return cached
+        except Exception:
+            pass
+    try:
+        data = await request('GET', f'/api/user_template/{tid}')
+        if not isinstance(data, dict):
+            raise RuntimeError('Invalid template response')
+    except Exception:
+        if not force:
+            try:
+                stale = db.cache_get(stale_key)
+                if isinstance(stale, dict):
+                    _l1_set(key, stale, 20)
+                    return stale
+            except Exception:
+                pass
+        raise
+    try:
+        db.cache_set(key, data, 120)
+        db.cache_set(stale_key, data, 7 * 24 * 3600)
+        _l1_set(key, data, 60)
+    except Exception:
+        pass
     return data
 
 
+def _cache_template_detail(template: dict) -> None:
+    if not isinstance(template, dict):
+        return
+    tid = str(template.get('id') or '')
+    if not tid:
+        return
+    key = f'panel:user_template:{tid}'
+    try:
+        db.cache_set(key, template, 120)
+        db.cache_set(f'{key}:last_good', template, 7 * 24 * 3600)
+        _l1_set(key, template, 60)
+    except Exception:
+        pass
+
+
 async def create_user_template(payload: dict) -> dict:
-    return await request('POST', '/api/user_template', payload=payload)
+    data = await request('POST', '/api/user_template', payload=payload)
+    _cache_template_detail(data if isinstance(data, dict) else {})
+    _l1_invalidate('panel:user_templates:')
+    try:
+        db.cache_delete_prefix('panel:user_templates:')
+    except Exception:
+        pass
+    return data
 
 
 async def update_user_template(template_id: str | int, payload: dict) -> dict:
-    return await request('PUT', f'/api/user_template/{template_id}', payload=payload)
+    data = await request('PUT', f'/api/user_template/{template_id}', payload=payload)
+    _cache_template_detail(data if isinstance(data, dict) else {})
+    _l1_invalidate('panel:user_templates:')
+    try:
+        db.cache_delete_prefix('panel:user_templates:')
+    except Exception:
+        pass
+    return data
 
 
 async def delete_user_template(template_id: str | int) -> Any:
-    return await request('DELETE', f'/api/user_template/{template_id}')
+    tid = str(template_id)
+    data = await request('DELETE', f'/api/user_template/{tid}')
+    _l1_invalidate(f'panel:user_template:{tid}')
+    _l1_invalidate('panel:user_templates:')
+    try:
+        db.cache_delete_prefix(f'panel:user_template:{tid}')
+        db.cache_delete_prefix('panel:user_templates:')
+    except Exception:
+        pass
+    return data
 
 
 async def get_groups() -> list[dict]:
@@ -287,6 +370,15 @@ def is_duplicate_username_error(exc: Exception) -> bool:
         'taken', 'unique', 'تکراری', 'وجود دارد', 'قبلا وجود دارد',
     ))
 
+
+
+def custom_template_override(template: dict, *, gb: int, months: int, users: int | None = None) -> dict:
+    out = dict(template)
+    out['data_limit'] = int(gb) * 1024 * 1024 * 1024
+    out['expire_duration'] = int(months) * 30 * 86400
+    if users is not None and int(users) > 0:
+        out['hwid_limit'] = int(users)
+    return out
 
 async def create_user_with_unique_username(
     template: dict,
@@ -344,7 +436,9 @@ def build_user_payload_from_template(template: dict, username: str, note: str | 
     except Exception:
         default_hwid_limit = 0
 
-    if default_hwid_limit > 0:
+    if template.get('hwid_limit') not in (None, '', 0, '0'):
+        payload['hwid_limit'] = int(template.get('hwid_limit'))
+    elif default_hwid_limit > 0:
         payload['hwid_limit'] = default_hwid_limit
 
     if template.get('data_limit') is not None:

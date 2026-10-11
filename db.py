@@ -192,15 +192,47 @@ def init_db() -> None:
                 created_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                sort_order INTEGER DEFAULT 1000,
+                is_active INTEGER DEFAULT 1,
+                created_at TEXT,
+                updated_at TEXT,
+                public_price_amount INTEGER DEFAULT 0,
+                custom_enabled INTEGER DEFAULT 0,
+                custom_base_template_id TEXT,
+                custom_min_gb INTEGER DEFAULT 1,
+                custom_max_gb INTEGER DEFAULT 100,
+                custom_months_json TEXT DEFAULT '[1]',
+                custom_base_per_gb INTEGER DEFAULT 0,
+                custom_month_pricing_mode TEXT DEFAULT 'per_gb',
+                custom_month_values_json TEXT DEFAULT '{}',
+                custom_users_enabled INTEGER DEFAULT 0,
+                custom_user_counts_json TEXT DEFAULT '[1]',
+                custom_user_pricing_mode TEXT DEFAULT 'fixed',
+                custom_user_values_json TEXT DEFAULT '{}'
+            );
+
+            CREATE TABLE IF NOT EXISTS product_test_templates (
+                product_id INTEGER PRIMARY KEY,
+                template_id TEXT NOT NULL,
+                updated_at TEXT,
+                FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS package_settings (
                 template_id TEXT PRIMARY KEY,
                 title TEXT,
                 category TEXT,
+                product_id INTEGER,
                 sort_order INTEGER DEFAULT 1000,
                 is_visible INTEGER DEFAULT 1,
                 price_amount INTEGER DEFAULT 0,
                 price_currency TEXT DEFAULT 'TOMAN',
-                updated_at TEXT
+                use_product_price INTEGER DEFAULT 0,
+                updated_at TEXT,
+                FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE SET NULL
             );
 
             CREATE TABLE IF NOT EXISTS notifications (
@@ -325,9 +357,17 @@ def init_db() -> None:
     _run_migrations()
 
 
-def _column_exists(table: str, column: str) -> bool:
-    with connect() as conn:
+def _column_exists(table: str, column: str, conn: sqlite3.Connection | None = None) -> bool:
+    """Return whether a column exists without opening a nested DB connection.
+
+    Migrations call this repeatedly while holding a write-capable connection. Reusing
+    that connection avoids avoidable WAL/schema-lock contention during upgrades.
+    """
+    if conn is not None:
         rows = conn.execute(f'PRAGMA table_info({table})').fetchall()
+        return any(row['name'] == column for row in rows)
+    with connect() as check_conn:
+        rows = check_conn.execute(f'PRAGMA table_info({table})').fetchall()
         return any(row['name'] == column for row in rows)
 
 
@@ -347,46 +387,104 @@ def _run_migrations() -> None:
                 updated_at TEXT
             )''')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_tutorials_active_sort ON tutorials(is_active, sort_order, id)')
-        if not _column_exists('package_settings', 'price_amount'):
+        conn.execute('''CREATE TABLE IF NOT EXISTS products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                sort_order INTEGER DEFAULT 1000,
+                is_active INTEGER DEFAULT 1,
+                created_at TEXT,
+                updated_at TEXT
+            )''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS product_test_templates (
+                product_id INTEGER PRIMARY KEY,
+                template_id TEXT NOT NULL,
+                updated_at TEXT,
+                FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
+            )''')
+        if not _column_exists('package_settings', 'product_id', conn):
+            conn.execute('ALTER TABLE package_settings ADD COLUMN product_id INTEGER')
+        default_product = conn.execute('SELECT id FROM products ORDER BY id LIMIT 1').fetchone()
+        if default_product is None:
+            cur = conn.execute('INSERT INTO products(name, sort_order, is_active, created_at, updated_at) VALUES(?,?,?,?,?)', ('محصول اصلی', 1000, 1, now_iso(), now_iso()))
+            default_product_id = int(cur.lastrowid)
+        else:
+            default_product_id = int(default_product['id'])
+        conn.execute('UPDATE package_settings SET product_id=? WHERE product_id IS NULL', (default_product_id,))
+        legacy_row = conn.execute("SELECT value FROM settings WHERE key='test_template_id'").fetchone()
+        if legacy_row and legacy_row['value']:
+            try:
+                legacy_test = json.loads(legacy_row['value'])
+            except Exception:
+                legacy_test = legacy_row['value']
+            if legacy_test:
+                conn.execute('''INSERT OR IGNORE INTO package_settings
+                    (template_id, product_id, sort_order, is_visible, price_amount, price_currency, updated_at)
+                    VALUES (?, ?, 1000, 0, 0, 'TOMAN', ?)''', (str(legacy_test), default_product_id, now_iso()))
+                conn.execute('UPDATE package_settings SET product_id=COALESCE(product_id, ?) WHERE template_id=?', (default_product_id, str(legacy_test)))
+                conn.execute('INSERT OR IGNORE INTO product_test_templates(product_id, template_id, updated_at) VALUES(?,?,?)', (default_product_id, str(legacy_test), now_iso()))
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_package_settings_product ON package_settings(product_id, sort_order, template_id)')
+        if not _column_exists('package_settings', 'price_amount', conn):
             conn.execute('ALTER TABLE package_settings ADD COLUMN price_amount INTEGER DEFAULT 0')
-        if not _column_exists('package_settings', 'price_currency'):
+        if not _column_exists('package_settings', 'price_currency', conn):
             conn.execute("ALTER TABLE package_settings ADD COLUMN price_currency TEXT DEFAULT 'TOMAN'")
         conn.execute("UPDATE package_settings SET price_currency='TOMAN' WHERE price_currency IS NULL OR price_currency='XTR'")
-        if not _column_exists('orders', 'customer_username'):
+        # Product public-price + custom-package settings (v0.3.0)
+        product_cols = {
+            'public_price_amount': 'INTEGER DEFAULT 0',
+            'custom_enabled': 'INTEGER DEFAULT 0',
+            'custom_base_template_id': 'TEXT',
+            'custom_min_gb': 'INTEGER DEFAULT 1',
+            'custom_max_gb': 'INTEGER DEFAULT 100',
+            'custom_months_json': "TEXT DEFAULT '[1]'",
+            'custom_base_per_gb': 'INTEGER DEFAULT 0',
+            'custom_month_pricing_mode': "TEXT DEFAULT 'per_gb'",
+            'custom_month_values_json': "TEXT DEFAULT '{}'",
+            'custom_users_enabled': 'INTEGER DEFAULT 0',
+            'custom_user_counts_json': "TEXT DEFAULT '[1]'",
+            'custom_user_pricing_mode': "TEXT DEFAULT 'fixed'",
+            'custom_user_values_json': "TEXT DEFAULT '{}'",
+        }
+        for col, spec in product_cols.items():
+            if not _column_exists('products', col, conn):
+                conn.execute(f'ALTER TABLE products ADD COLUMN {col} {spec}')
+        if not _column_exists('package_settings', 'use_product_price', conn):
+            conn.execute('ALTER TABLE package_settings ADD COLUMN use_product_price INTEGER DEFAULT 0')
+
+        if not _column_exists('orders', 'customer_username', conn):
             conn.execute('ALTER TABLE orders ADD COLUMN customer_username TEXT')
-        if not _column_exists('orders', 'amount_toman'):
+        if not _column_exists('orders', 'amount_toman', conn):
             conn.execute('ALTER TABLE orders ADD COLUMN amount_toman INTEGER DEFAULT 0')
-        if not _column_exists('orders', 'discount_amount'):
+        if not _column_exists('orders', 'discount_amount', conn):
             conn.execute('ALTER TABLE orders ADD COLUMN discount_amount INTEGER DEFAULT 0')
-        if not _column_exists('orders', 'discount_code'):
+        if not _column_exists('orders', 'discount_code', conn):
             conn.execute('ALTER TABLE orders ADD COLUMN discount_code TEXT')
-        if not _column_exists('orders', 'stars_amount'):
+        if not _column_exists('orders', 'stars_amount', conn):
             conn.execute('ALTER TABLE orders ADD COLUMN stars_amount INTEGER DEFAULT 0')
-        if not _column_exists('orders', 'wallet_used'):
+        if not _column_exists('orders', 'wallet_used', conn):
             conn.execute('ALTER TABLE orders ADD COLUMN wallet_used INTEGER DEFAULT 0')
-        if not _column_exists('orders', 'telegram_payment_charge_id'):
+        if not _column_exists('orders', 'telegram_payment_charge_id', conn):
             conn.execute('ALTER TABLE orders ADD COLUMN telegram_payment_charge_id TEXT')
-        if not _column_exists('orders', 'provider_payment_charge_id'):
+        if not _column_exists('orders', 'provider_payment_charge_id', conn):
             conn.execute('ALTER TABLE orders ADD COLUMN provider_payment_charge_id TEXT')
-        if not _column_exists('orders', 'invoice_payload'):
+        if not _column_exists('orders', 'invoice_payload', conn):
             conn.execute('ALTER TABLE orders ADD COLUMN invoice_payload TEXT')
-        if not _column_exists('orders', 'order_type'):
+        if not _column_exists('orders', 'order_type', conn):
             conn.execute("ALTER TABLE orders ADD COLUMN order_type TEXT DEFAULT 'new'")
-        if not _column_exists('orders', 'service_id'):
+        if not _column_exists('orders', 'service_id', conn):
             conn.execute('ALTER TABLE orders ADD COLUMN service_id INTEGER')
-        if not _column_exists('orders', 'payment_method'):
+        if not _column_exists('orders', 'payment_method', conn):
             conn.execute('ALTER TABLE orders ADD COLUMN payment_method TEXT')
-        if not _column_exists('orders', 'provider_invoice_id'):
+        if not _column_exists('orders', 'provider_invoice_id', conn):
             conn.execute('ALTER TABLE orders ADD COLUMN provider_invoice_id TEXT')
-        if not _column_exists('orders', 'provider_payment_url'):
+        if not _column_exists('orders', 'provider_payment_url', conn):
             conn.execute('ALTER TABLE orders ADD COLUMN provider_payment_url TEXT')
-        if not _column_exists('orders', 'provider_status'):
+        if not _column_exists('orders', 'provider_status', conn):
             conn.execute('ALTER TABLE orders ADD COLUMN provider_status TEXT')
-        if not _column_exists('orders', 'provider_raw_json'):
+        if not _column_exists('orders', 'provider_raw_json', conn):
             conn.execute('ALTER TABLE orders ADD COLUMN provider_raw_json TEXT')
-        if not _column_exists('orders', 'payable_toman'):
+        if not _column_exists('orders', 'payable_toman', conn):
             conn.execute('ALTER TABLE orders ADD COLUMN payable_toman INTEGER DEFAULT 0')
-        if not _column_exists('orders', 'payment_effects_applied'):
+        if not _column_exists('orders', 'payment_effects_applied', conn):
             conn.execute('ALTER TABLE orders ADD COLUMN payment_effects_applied INTEGER DEFAULT 0')
 
         conn.execute(
@@ -401,6 +499,23 @@ def _run_migrations() -> None:
                 rewarded_at TEXT
             )"""
         )
+        if not _column_exists('referrals', 'reward_order_id', conn):
+            conn.execute('ALTER TABLE referrals ADD COLUMN reward_order_id INTEGER')
+        if not _column_exists('referrals', 'reward_reason', conn):
+            conn.execute('ALTER TABLE referrals ADD COLUMN reward_reason TEXT')
+        # Canonicalize legacy referral settings.
+        legacy_reward = conn.execute("SELECT value FROM settings WHERE key='referral_reward_amount'").fetchone()
+        canonical_reward = conn.execute("SELECT value FROM settings WHERE key='referral_reward_toman'").fetchone()
+        if legacy_reward and not canonical_reward:
+            conn.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('referral_reward_toman',?)", (legacy_reward['value'],))
+        legacy_condition = conn.execute("SELECT value FROM settings WHERE key='referral_condition'").fetchone()
+        if legacy_condition:
+            try:
+                condition_value = json.loads(legacy_condition['value'])
+            except Exception:
+                condition_value = legacy_condition['value']
+            if str(condition_value or '').lower() == 'payment':
+                conn.execute("UPDATE settings SET value=? WHERE key='referral_condition'", (json.dumps('purchase', ensure_ascii=False),))
         conn.execute(
             """CREATE TABLE IF NOT EXISTS wallet_charge_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -416,26 +531,26 @@ def _run_migrations() -> None:
                 paid_at TEXT
             )"""
         )
-        if not _column_exists('wallet_charge_requests', 'provider_invoice_id'):
+        if not _column_exists('wallet_charge_requests', 'provider_invoice_id', conn):
             conn.execute('ALTER TABLE wallet_charge_requests ADD COLUMN provider_invoice_id TEXT')
-        if not _column_exists('wallet_charge_requests', 'provider_payment_url'):
+        if not _column_exists('wallet_charge_requests', 'provider_payment_url', conn):
             conn.execute('ALTER TABLE wallet_charge_requests ADD COLUMN provider_payment_url TEXT')
-        if not _column_exists('wallet_charge_requests', 'provider_status'):
+        if not _column_exists('wallet_charge_requests', 'provider_status', conn):
             conn.execute('ALTER TABLE wallet_charge_requests ADD COLUMN provider_status TEXT')
-        if not _column_exists('wallet_charge_requests', 'provider_raw_json'):
+        if not _column_exists('wallet_charge_requests', 'provider_raw_json', conn):
             conn.execute('ALTER TABLE wallet_charge_requests ADD COLUMN provider_raw_json TEXT')
-        if not _column_exists('wallet_charge_requests', 'campaign_id'):
+        if not _column_exists('wallet_charge_requests', 'campaign_id', conn):
             conn.execute('ALTER TABLE wallet_charge_requests ADD COLUMN campaign_id INTEGER')
-        if not _column_exists('wallet_charge_requests', 'campaign_bonus_percent'):
+        if not _column_exists('wallet_charge_requests', 'campaign_bonus_percent', conn):
             conn.execute('ALTER TABLE wallet_charge_requests ADD COLUMN campaign_bonus_percent REAL DEFAULT 0')
-        if not _column_exists('wallet_charge_requests', 'campaign_bonus_amount'):
+        if not _column_exists('wallet_charge_requests', 'campaign_bonus_amount', conn):
             conn.execute('ALTER TABLE wallet_charge_requests ADD COLUMN campaign_bonus_amount INTEGER DEFAULT 0')
-        if not _column_exists('wallet_charge_requests', 'campaign_bonus_applied'):
+        if not _column_exists('wallet_charge_requests', 'campaign_bonus_applied', conn):
             conn.execute('ALTER TABLE wallet_charge_requests ADD COLUMN campaign_bonus_applied INTEGER DEFAULT 0')
-        if not _column_exists('wallet_charge_requests', 'campaign_timing_rule'):
+        if not _column_exists('wallet_charge_requests', 'campaign_timing_rule', conn):
             conn.execute("ALTER TABLE wallet_charge_requests ADD COLUMN campaign_timing_rule TEXT DEFAULT 'payment_time'")
 
-        if not _column_exists('test_service_usage', 'reminder_sent_at'):
+        if not _column_exists('test_service_usage', 'reminder_sent_at', conn):
             conn.execute('ALTER TABLE test_service_usage ADD COLUMN reminder_sent_at TEXT')
 
         # --- Receipt tracking extensions ---
@@ -454,27 +569,27 @@ def _run_migrations() -> None:
                 reviewed_at TEXT,
                 reject_reason TEXT
             )''')
-        if not _column_exists('card_receipts', 'order_type'):
+        if not _column_exists('card_receipts', 'order_type', conn):
             conn.execute("ALTER TABLE card_receipts ADD COLUMN order_type TEXT DEFAULT 'new'")
-        if not _column_exists('card_receipts', 'service_id'):
+        if not _column_exists('card_receipts', 'service_id', conn):
             conn.execute('ALTER TABLE card_receipts ADD COLUMN service_id INTEGER')
-        if not _column_exists('card_receipts', 'package_id'):
+        if not _column_exists('card_receipts', 'package_id', conn):
             conn.execute('ALTER TABLE card_receipts ADD COLUMN package_id TEXT')
-        if not _column_exists('card_receipts', 'package_name'):
+        if not _column_exists('card_receipts', 'package_name', conn):
             conn.execute('ALTER TABLE card_receipts ADD COLUMN package_name TEXT')
-        if not _column_exists('card_receipts', 'customer_username'):
+        if not _column_exists('card_receipts', 'customer_username', conn):
             conn.execute('ALTER TABLE card_receipts ADD COLUMN customer_username TEXT')
-        if not _column_exists('card_receipts', 'admin_delivery_status'):
+        if not _column_exists('card_receipts', 'admin_delivery_status', conn):
             conn.execute("ALTER TABLE card_receipts ADD COLUMN admin_delivery_status TEXT DEFAULT 'pending'")
-        if not _column_exists('card_receipts', 'notified_admin_ids'):
+        if not _column_exists('card_receipts', 'notified_admin_ids', conn):
             conn.execute("ALTER TABLE card_receipts ADD COLUMN notified_admin_ids TEXT DEFAULT '[]'")
-        if not _column_exists('card_receipts', 'admin_message_ids'):
+        if not _column_exists('card_receipts', 'admin_message_ids', conn):
             conn.execute("ALTER TABLE card_receipts ADD COLUMN admin_message_ids TEXT DEFAULT '{}'")
-        if not _column_exists('card_receipts', 'last_delivery_error'):
+        if not _column_exists('card_receipts', 'last_delivery_error', conn):
             conn.execute('ALTER TABLE card_receipts ADD COLUMN last_delivery_error TEXT')
-        if not _column_exists('card_receipts', 'delivery_attempts'):
+        if not _column_exists('card_receipts', 'delivery_attempts', conn):
             conn.execute('ALTER TABLE card_receipts ADD COLUMN delivery_attempts INTEGER DEFAULT 0')
-        if not _column_exists('card_receipts', 'next_delivery_retry_at'):
+        if not _column_exists('card_receipts', 'next_delivery_retry_at', conn):
             conn.execute('ALTER TABLE card_receipts ADD COLUMN next_delivery_retry_at TEXT')
 
         # --- System errors soft-delete/cleanup extensions ---
@@ -490,7 +605,7 @@ def _run_migrations() -> None:
                 is_resolved INTEGER DEFAULT 0,
                 created_at TEXT
             )''')
-        if not _column_exists('system_errors', 'is_deleted'):
+        if not _column_exists('system_errors', 'is_deleted', conn):
             conn.execute('ALTER TABLE system_errors ADD COLUMN is_deleted INTEGER DEFAULT 0')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_system_errors_deleted ON system_errors(is_deleted, is_resolved)')
         conn.execute('CREATE INDEX IF NOT EXISTS idx_card_receipts_delivery ON card_receipts(admin_delivery_status, status)')
@@ -972,6 +1087,46 @@ def get_order(order_id: int) -> dict[str, Any] | None:
     return fetchone('SELECT * FROM orders WHERE id=?', (order_id,))
 
 
+def product_for_template(template_id: str | int | None) -> dict[str, Any] | None:
+    """Return the product/category that owns a normal or custom package id."""
+    if template_id in (None, ''):
+        return None
+    raw = str(template_id)
+    if raw.startswith('custom:'):
+        parts = raw.split(':')
+        if len(parts) >= 6:
+            try:
+                return fetchone('SELECT id, name, is_active FROM products WHERE id=?', (int(parts[5]),))
+            except Exception:
+                return None
+    return fetchone(
+        '''SELECT p.id, p.name, p.is_active
+           FROM package_settings ps
+           JOIN products p ON p.id=ps.product_id
+           WHERE ps.template_id=? LIMIT 1''',
+        (str(template_id),),
+    )
+
+
+def product_context_for_template(template_id: str | int | None) -> dict[str, Any]:
+    product = product_for_template(template_id) or {}
+    custom_volume_gb = custom_months = custom_users = '-'
+    raw = str(template_id or '')
+    if raw.startswith('custom:'):
+        parts = raw.split(':')
+        if len(parts) >= 6:
+            custom_volume_gb, custom_months, custom_users = parts[2], parts[3], parts[4]
+    return {
+        'product_id': str(product.get('id') or '-'),
+        'product_name': str(product.get('name') or 'نامشخص'),
+        'product_public_price_per_gb': f"{int(product.get('public_price_amount') or 0):,} تومان",
+        'product_public_price_per_gb_raw': str(int(product.get('public_price_amount') or 0)),
+        'custom_volume_gb': str(custom_volume_gb),
+        'custom_months': str(custom_months),
+        'custom_users': str(custom_users),
+    }
+
+
 def mark_order_paid(order_id: int, stars_amount: int, telegram_payment_charge_id: str | None, provider_payment_charge_id: str | None) -> None:
     execute(
         """UPDATE orders
@@ -1058,8 +1213,6 @@ def mark_wallet_charge_paid_provider(request_id: int, method: str, provider_paym
 
 def finalize_order_payment_effects(order_id: int) -> bool:
     """Apply wallet deduction, coupon usage and referral reward exactly once per paid order."""
-    referral_condition = str(get_setting('referral_condition', 'payment') or 'payment')
-    fallback_reward = int(get_setting('referral_reward_toman', 0) or 0)
     with connect() as conn:
         conn.execute('BEGIN IMMEDIATE')
         row = conn.execute('SELECT * FROM orders WHERE id=?', (int(order_id),)).fetchone()
@@ -1077,16 +1230,6 @@ def finalize_order_payment_effects(order_id: int) -> bool:
             coupon = conn.execute('SELECT id FROM coupons WHERE UPPER(code)=UPPER(?)', (code,)).fetchone()
             if coupon:
                 conn.execute('UPDATE coupons SET used_count=used_count+1 WHERE id=?', (int(coupon['id']),))
-        if referral_condition == 'payment':
-            ref = conn.execute('SELECT * FROM referrals WHERE invited_id=? AND reward_paid=0', (int(order['user_id']),)).fetchone()
-            if ref:
-                reward = int(ref['reward_amount'] or fallback_reward or 0)
-                if reward > 0:
-                    conn.execute('INSERT INTO wallet_transactions (user_id, admin_id, amount, reason, created_at) VALUES (?, NULL, ?, ?, ?)',
-                                 (int(ref['inviter_id']), reward, f'پاداش دعوت کاربر {int(order["user_id"])}', now_iso()))
-                    conn.execute("UPDATE referrals SET status='rewarded', reward_paid=1, rewarded_at=? WHERE id=?", (now_iso(), int(ref['id'])))
-                else:
-                    conn.execute("UPDATE referrals SET status='done_no_reward', reward_paid=1, rewarded_at=? WHERE id=?", (now_iso(), int(ref['id'])))
         conn.execute('UPDATE orders SET payment_effects_applied=1 WHERE id=?', (int(order_id),))
         conn.commit()
         return True
@@ -1210,7 +1353,7 @@ def create_referral(inviter_id: int, invited_id: int) -> bool:
         return False
     if fetchone('SELECT id FROM referrals WHERE invited_id=?', (int(invited_id),)):
         return False
-    reward = int(get_setting('referral_reward_toman', 0) or 0)
+    reward = referral_reward_amount()
     execute(
         'INSERT INTO referrals (inviter_id, invited_id, status, reward_amount, reward_paid, created_at) VALUES (?, ?, ?, ?, 0, ?)',
         (int(inviter_id), int(invited_id), 'pending', reward, now_iso()),
@@ -1218,20 +1361,70 @@ def create_referral(inviter_id: int, invited_id: int) -> bool:
     return True
 
 
-def process_referral_reward(invited_id: int, reason: str = 'join') -> bool:
-    row = fetchone('SELECT * FROM referrals WHERE invited_id=? AND reward_paid=0', (int(invited_id),))
-    if not row:
+def referral_condition() -> str:
+    raw = str(get_setting('referral_condition', 'purchase') or 'purchase').strip().lower()
+    return 'join' if raw == 'join' else 'purchase'
+
+
+def referral_reward_amount() -> int:
+    canonical = get_setting('referral_reward_toman', None)
+    if canonical not in (None, ''):
+        return max(0, int(canonical or 0))
+    return max(0, int(get_setting('referral_reward_amount', 0) or 0))
+
+
+def process_referral_reward(invited_id: int, reason: str = 'join', order_id: int | None = None) -> bool:
+    """Credit only the inviter wallet, exactly once, when the rule is satisfied."""
+    if not bool(get_setting('referral_enabled', True)):
         return False
-    required = get_setting('referral_condition', 'payment')
-    if required == 'payment' and reason != 'payment':
+    required = referral_condition()
+    normalized_reason = 'purchase' if reason in {'payment', 'purchase'} else 'join'
+    if required != normalized_reason:
         return False
-    amount = int(row.get('reward_amount') or get_setting('referral_reward_toman', 0) or 0)
-    if amount <= 0:
-        execute('UPDATE referrals SET status=?, reward_paid=1, rewarded_at=? WHERE id=?', ('done_no_reward', now_iso(), int(row['id'])))
+
+    with connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute('SELECT * FROM referrals WHERE invited_id=? AND reward_paid=0', (int(invited_id),)).fetchone()
+        if not row:
+            conn.rollback()
+            return False
+        if normalized_reason == 'purchase':
+            if not order_id:
+                conn.rollback()
+                return False
+            order_row = conn.execute('SELECT * FROM orders WHERE id=? AND user_id=?', (int(order_id), int(invited_id))).fetchone()
+            if not order_row:
+                conn.rollback()
+                return False
+            order = dict(order_row)
+            if str(order.get('status') or '') != 'service_ready':
+                conn.rollback()
+                return False
+            if str(order.get('order_type') or 'new') not in {'new', 'renew'}:
+                conn.rollback()
+                return False
+        amount = int(row['reward_amount'] or referral_reward_amount() or 0)
+        if amount > 0:
+            conn.execute(
+                'INSERT INTO wallet_transactions (user_id, admin_id, amount, reason, created_at) VALUES (?, NULL, ?, ?, ?)',
+                (int(row['inviter_id']), amount, f'پاداش دعوت کاربر {int(invited_id)}', now_iso()),
+            )
+            status = 'rewarded'
+        else:
+            status = 'done_no_reward'
+        conn.execute(
+            'UPDATE referrals SET status=?, reward_paid=1, rewarded_at=?, reward_order_id=?, reward_reason=? WHERE id=? AND reward_paid=0',
+            (status, now_iso(), int(order_id) if order_id else None, normalized_reason, int(row['id'])),
+        )
+        conn.commit()
         return True
-    add_wallet_transaction(int(row['inviter_id']), amount, f'پاداش دعوت کاربر {invited_id}')
-    execute('UPDATE referrals SET status=?, reward_paid=1, rewarded_at=? WHERE id=?', ('rewarded', now_iso(), int(row['id'])))
-    return True
+
+
+def process_referral_purchase_reward(order_id: int) -> bool:
+    order = get_order(int(order_id))
+    if not order:
+        return False
+    return process_referral_reward(int(order['user_id']), reason='purchase', order_id=int(order_id))
 
 
 def referral_stats(user_id: int) -> dict[str, int]:
@@ -1688,6 +1881,7 @@ INVOICE_TEXT_DEFAULT = (
     '🧾 فاکتور خرید\n\n'
     'شماره سفارش: {order_id}\n'
     'آیدی عددی کاربر: {user_id}\n'
+    'محصول: {product_name}\n'
     'نام بسته: {package_name}\n'
     'نام سرویس: {service_name}\n'
     'مبلغ اصلی: {price}\n'
@@ -1717,7 +1911,15 @@ def create_invoice_text(order: dict[str, Any], service_message: str = '') -> str
         service = None
     sub_link = (service or {}).get('subscription_url') or '-'
     template = str(get_setting('invoice_text', INVOICE_TEXT_DEFAULT) or INVOICE_TEXT_DEFAULT)
+    product_ctx = product_context_for_template(order.get('package_id'))
     values = {
+        'product_id': _html_text(product_ctx['product_id']),
+        'product_name': _html_text(product_ctx['product_name']),
+        'product_public_price_per_gb': _html_text(product_ctx.get('product_public_price_per_gb') or '0 تومان'),
+        'product_public_price_per_gb_raw': _html_text(product_ctx.get('product_public_price_per_gb_raw') or '0'),
+        'custom_volume_gb': _html_text(product_ctx.get('custom_volume_gb') or '-'),
+        'custom_months': _html_text(product_ctx.get('custom_months') or '-'),
+        'custom_users': _html_text(product_ctx.get('custom_users') or '-'),
         'order_id': _html_code(order.get('id')),
         'user_id': _html_code(order.get('user_id')),
         'package_id': _html_text(order.get('package_id') or '-'),

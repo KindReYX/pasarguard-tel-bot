@@ -44,7 +44,6 @@ def settings_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text='💵 نرخ دلار کریپتو / نوسان', callback_data='settings:navasan')],
         [InlineKeyboardButton(text='📋 نمایش تنظیمات', callback_data='settings:list')],
         [InlineKeyboardButton(text='🔁 تنظیمات تمدید', callback_data='settings:renewal')],
-        [InlineKeyboardButton(text='🧪 تنظیمات سرویس تست', callback_data='test_admin:home')],
     ])
 
 

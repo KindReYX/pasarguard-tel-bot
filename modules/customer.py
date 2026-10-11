@@ -34,6 +34,7 @@ import modules.payment_engine as payment_engine
 from modules import edit_runtime
 from modules.qr_tools import send_qr_photo, make_qr_file
 from modules import tetrapay, plisio_pay
+from modules.packs import public_price_for_pack
 
 customer_router = Router()
 
@@ -126,6 +127,7 @@ async def send_subscription_delivery(message: Message, service: dict, sub_url: s
         getattr(message, 'from_user', None),
         support=str(db.get_setting('support_username', settings.support_username) or ''),
     )
+    context.update(db.product_context_for_template(service.get('package_id')))
     context.update({
         'sub_link': str(sub),
         'service_name': str(username),
@@ -406,25 +408,69 @@ def visible_pack_rows(packs: list[dict]) -> list[tuple[dict, dict]]:
         if not int(meta.get('is_visible', 1)):
             continue
         price = int(meta.get('price_amount') or 0)
+        if int(meta.get('use_product_price') or 0) and meta.get('product_id'):
+            price = public_price_for_pack(meta.get('product_id'), pack)
         if price <= 0:
             continue
+        meta = dict(meta); meta['effective_price_amount'] = price
         result.append((pack, meta))
     result.sort(key=lambda item: (int(item[1].get('sort_order', 1000)), item[0].get('id', 0)))
     return result
 
 
-def customer_packs_keyboard(items: list[tuple[dict, dict]]) -> InlineKeyboardMarkup:
+def customer_packs_keyboard(items: list[tuple[dict, dict]], product_id: int | None = None) -> InlineKeyboardMarkup:
     rows = []
     for pack, meta in items:
         template_id = str(pack.get('id'))
         rows.append([
             InlineKeyboardButton(
-                text=f"📦 {pack_title(pack)} | {format_toman(meta.get('price_amount'))}",
+                text=f"📦 {pack_title(pack)} | {format_toman(meta.get('effective_price_amount', meta.get('price_amount')))}",
                 callback_data=f'cust_pack:{template_id}',
             )
         ])
+    if product_id is not None:
+        pcustom = db.fetchone('SELECT custom_enabled FROM products WHERE id=?', (int(product_id),)) or {}
+        if int(pcustom.get('custom_enabled') or 0):
+            rows.append([InlineKeyboardButton(text='🎛 بسته دلخواه', callback_data=f'cust_custom:{int(product_id)}')])
+    if product_id is not None and len(customer_available_products()) > 1:
+        rows.append([InlineKeyboardButton(text='🔙 محصولات', callback_data='cust_products')])
     rows.append([InlineKeyboardButton(text='❌ انصراف و بازگشت', callback_data='cust_cancel')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def customer_available_products() -> list[dict]:
+    return db.fetchall(
+        '''SELECT DISTINCT p.* FROM products p
+           LEFT JOIN package_settings ps ON ps.product_id=p.id
+           WHERE p.is_active=1 AND (p.custom_enabled=1 OR (ps.is_visible=1 AND (COALESCE(ps.price_amount,0)>0 OR (ps.use_product_price=1 AND COALESCE(p.public_price_amount,0)>0))))
+           ORDER BY p.sort_order, p.id'''
+    )
+
+
+def visible_pack_rows_for_product(packs: list[dict], product_id: int) -> list[tuple[dict, dict]]:
+    allowed = {str(r['template_id']): r for r in db.fetchall(
+        'SELECT * FROM package_settings WHERE product_id=? AND is_visible=1 ORDER BY sort_order, template_id',
+        (int(product_id),),
+    )}
+    result = []
+    for pack in packs:
+        tid = str(pack.get('id'))
+        meta = allowed.get(tid)
+        if meta:
+            price = int(meta.get('price_amount') or 0)
+            if int(meta.get('use_product_price') or 0):
+                price = public_price_for_pack(product_id, pack)
+            if price > 0:
+                meta = dict(meta); meta['effective_price_amount'] = price
+                result.append((pack, meta))
+    result.sort(key=lambda item: (int(item[1].get('sort_order', 1000)), item[0].get('id', 0)))
+    return result
+
+
+def customer_products_keyboard(rows: list[dict]) -> InlineKeyboardMarkup:
+    buttons = [[InlineKeyboardButton(text=f"🛍 {p['name']}", callback_data=f"cust_product:{p['id']}")] for p in rows]
+    buttons.append([InlineKeyboardButton(text='❌ انصراف و بازگشت', callback_data='cust_cancel')])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def customer_renew_packs_keyboard(items: list[tuple[dict, dict]], service_id: int) -> InlineKeyboardMarkup:
@@ -433,7 +479,7 @@ def customer_renew_packs_keyboard(items: list[tuple[dict, dict]], service_id: in
         template_id = str(pack.get('id'))
         rows.append([
             InlineKeyboardButton(
-                text=f"📦 {pack_title(pack)} | {format_toman(meta.get('price_amount'))}",
+                text=f"📦 {pack_title(pack)} | {format_toman(meta.get('effective_price_amount', meta.get('price_amount')))}",
                 callback_data=f'cust_renew_pack:{service_id}:{template_id}',
             )
         ])
@@ -588,11 +634,26 @@ def crypto_pay_link_keyboard(payment_url: str, check_callback: str, back_callbac
     ])
 
 
-def test_service_keyboard() -> InlineKeyboardMarkup:
+def test_service_keyboard(product_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text='✅ دریافت سرویس تست', callback_data='cust_test_get')],
+        [InlineKeyboardButton(text='✅ دریافت سرویس تست', callback_data=f'cust_test_get:{int(product_id)}')],
         [InlineKeyboardButton(text='❌ بازگشت', callback_data='cust_cancel')],
     ])
+
+
+def test_products() -> list[dict]:
+    return db.fetchall(
+        '''SELECT p.*, pt.template_id FROM products p
+           JOIN product_test_templates pt ON pt.product_id=p.id
+           WHERE p.is_active=1
+           ORDER BY p.sort_order, p.id'''
+    )
+
+
+def test_products_keyboard(rows: list[dict]) -> InlineKeyboardMarkup:
+    buttons = [[InlineKeyboardButton(text=f"🧪 {p['name']}", callback_data=f"cust_test_product:{p['id']}")] for p in rows]
+    buttons.append([InlineKeyboardButton(text='❌ بازگشت', callback_data='cust_cancel')])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 PACKAGE_USERNAME_PROMPT_DEFAULT = (
@@ -636,7 +697,16 @@ def package_username_prompt_context(pack: dict, meta: dict) -> dict[str, Any]:
     username_prefix = str(pack.get('username_prefix') or '')
     username_suffix = str(pack.get('username_suffix') or '')
     hwid_limit = pack.get('hwid_limit')
-    ctx = {
+    ctx = db.product_context_for_template(package_id)
+    custom_gb = custom_months = custom_users = '-'
+    if package_id.startswith('custom:'):
+        parts = package_id.split(':')
+        if len(parts) >= 6:
+            custom_gb, custom_months, custom_users = parts[2], parts[3], parts[4]
+    ctx.update({
+        'custom_volume_gb': custom_gb,
+        'custom_months': custom_months,
+        'custom_users': custom_users,
         'package_name': package_name,
         'package_id': package_id,
         'package_price': format_toman(price_raw),
@@ -656,7 +726,7 @@ def package_username_prompt_context(pack: dict, meta: dict) -> dict[str, Any]:
         'data_limit_raw': data_limit_raw,
         'duration': format_duration_seconds(duration_seconds),
         'duration_seconds': duration_seconds,
-    }
+    })
     return ctx
 
 
@@ -733,6 +803,7 @@ def build_preinvoice_text(data: dict) -> str:
     mode_text = 'تمدید سرویس' if service_id else 'خرید سرویس'
     return (
         f'🧾 پیش فاکتور {mode_text}\n\n'
+        f"محصول: {copy_code(data.get('product_name') or 'نامشخص')}\n"
         f"بسته: {copy_code(data.get('package_name'))}\n"
         f"نام کاربری سرویس: {copy_code(data.get('service_username'))}\n"
         f"قیمت اصلی: {format_toman(price)}\n"
@@ -760,7 +831,8 @@ SERVICE_DETAIL_TEXT_DEFAULT = (
     '📊 وضعیت سرویس : {status}\n'
     '👤 نام سرویس : {service_name}\n\n'
     '🌍 موقعیت سرویس : 🌟 پلن حجمی\n'
-    '🗂 نام محصول : {package_name}\n'
+    '🛍 محصول : {product_name}\n'
+    '📦 بسته : {package_name}\n'
     '🧾 شماره سفارش : {order_id}\n'
     '🗓 تاریخ خرید : {purchase_date}\n\n'
     '🔋 ترافیک : {data_limit}\n'
@@ -785,7 +857,8 @@ def _service_detail_context(service: dict, user_data: dict | None = None, sub_ur
     online_at = user_data.get('online_at') or user_data.get('last_online') or service.get('online_at')
     sub_updated = service.get('last_subscription_update') or service.get('updated_at') or '-'
     client = user_data.get('client_type') or user_data.get('last_client') or user_data.get('user_agent') or service.get('client_type') or 'نامشخص'
-    return {
+    context = db.product_context_for_template(service.get('package_id'))
+    context.update({
         'sub_link': str(sub_url or service.get('subscription_url') or api_client.extract_subscription_url(user_data) or '-'),
         'status': service_status_label(user_data.get('status') or service.get('status')),
         'service_name': str(service.get('service_username') or '-'),
@@ -801,7 +874,8 @@ def _service_detail_context(service: dict, user_data: dict | None = None, sub_ur
         'last_online': format_timestamp(online_at),
         'subscription_updated': str(sub_updated),
         'client': str(client),
-    }
+    })
+    return context
 
 def _render_service_detail_plain(template: str, context: dict[str, str]) -> str:
     text = str(template or SERVICE_DETAIL_TEXT_DEFAULT)
@@ -951,7 +1025,14 @@ async def refresh_service_from_panel(service: dict) -> tuple[dict, dict]:
 
 async def create_or_renew_service_for_order(order: dict) -> tuple[bool, str, dict | None]:
     try:
-        template = await api_client.get_user_template(order['package_id'])
+        package_id_raw = str(order['package_id'])
+        custom_parts = package_id_raw.split(':') if package_id_raw.startswith('custom:') else []
+        if len(custom_parts) >= 6:
+            base_tid, gb, months, users, product_id = custom_parts[1], int(custom_parts[2]), int(custom_parts[3]), int(custom_parts[4]), int(custom_parts[5])
+            template = await api_client.get_user_template(base_tid)
+            template = api_client.custom_template_override(template, gb=gb, months=months, users=(users or None))
+        else:
+            template = await api_client.get_user_template(order['package_id'])
         user_id = int(order['user_id'])
         if order.get('order_type') == 'renew' and order.get('service_id'):
             service = db.get_user_service(int(order['service_id']), user_id)
@@ -1028,6 +1109,7 @@ async def process_one_service_job(job: dict) -> tuple[bool, str]:
         if ok:
             db.mark_service_job_done(job_id)
             db.execute("UPDATE orders SET status='service_ready' WHERE id=?", (order_id,))
+            db.process_referral_purchase_reward(order_id)
             return True, service_message
         raise RuntimeError(service_message)
     except Exception as exc:
@@ -1081,6 +1163,7 @@ async def finish_paid_order(message: Message, order: dict, stars_amount: int, ch
         if after_purchase:
             support = db.get_setting('support_username', settings.support_username)
             ctx = user_template_context(message.from_user, support=support)
+            ctx.update(db.product_context_for_template(final_order.get('package_id')))
             ctx.update({
                 'order_id': final_order.get('id', ''),
                 'package_name': final_order.get('package_name', ''),
@@ -1095,15 +1178,47 @@ async def finish_paid_order(message: Message, order: dict, stars_amount: int, ch
 @customer_router.message(CustomerButtonFilter('buy'))
 async def buy_subscription(message: Message, state: FSMContext):
     await state.clear()
-    packs = await api_client.get_user_templates()
-    items = visible_pack_rows(packs)
-    if not items:
-        await message.answer('فعلا بسته فعالی برای خرید وجود ندارد.', reply_markup=customer_keyboard())
+    rows = customer_available_products()
+    if not rows:
+        await message.answer('فعلا محصول فعالی برای خرید وجود ندارد.', reply_markup=customer_keyboard())
         return
-    await message.answer(
-        '🛒 خرید اشتراک\n\nبسته موردنظر را انتخاب کنید:',
-        reply_markup=customer_packs_keyboard(items),
-    )
+    if len(rows) == 1:
+        packs = await api_client.get_user_templates()
+        items = visible_pack_rows_for_product(packs, int(rows[0]['id']))
+        product_id = int(rows[0]['id'])
+        custom_enabled = int(rows[0].get('custom_enabled') or 0)
+        if not items and not custom_enabled:
+            await message.answer('فعلا بسته فعالی برای خرید وجود ندارد.', reply_markup=customer_keyboard())
+            return
+        await message.answer(f"🛒 خرید اشتراک\n\n{rows[0]['name']}\nبسته موردنظر را انتخاب کنید:", reply_markup=customer_packs_keyboard(items, product_id))
+        return
+    await message.answer('🛒 خرید اشتراک\n\nمحصول موردنظر را انتخاب کنید:', reply_markup=customer_products_keyboard(rows))
+
+
+@customer_router.callback_query(F.data == 'cust_products')
+async def customer_products(callback: CallbackQuery):
+    rows = customer_available_products()
+    if len(rows) == 1:
+        packs = await api_client.get_user_templates()
+        items = visible_pack_rows_for_product(packs, int(rows[0]['id']))
+        await edit_or_answer(callback, f"🛒 {rows[0]['name']}\n\nبسته موردنظر را انتخاب کنید:", reply_markup=customer_packs_keyboard(items, int(rows[0]['id'])))
+    else:
+        await edit_or_answer(callback, '🛒 خرید اشتراک\n\nمحصول موردنظر را انتخاب کنید:', reply_markup=customer_products_keyboard(rows))
+    await callback.answer()
+
+
+@customer_router.callback_query(F.data.startswith('cust_product:'))
+async def customer_choose_product(callback: CallbackQuery):
+    product_id = int(callback.data.split(':')[-1])
+    product = db.fetchone('SELECT * FROM products WHERE id=? AND is_active=1', (product_id,))
+    if not product:
+        await callback.answer('این محصول در دسترس نیست.', show_alert=True); return
+    packs = await api_client.get_user_templates()
+    items = visible_pack_rows_for_product(packs, product_id)
+    if not items and not int(product.get('custom_enabled') or 0):
+        await callback.answer('این محصول فعلا بسته قابل خرید ندارد.', show_alert=True); return
+    await edit_or_answer(callback, f"🛍 {product['name']}\n\nبسته موردنظر را انتخاب کنید:", reply_markup=customer_packs_keyboard(items, product_id))
+    await callback.answer()
 
 
 @customer_router.callback_query(F.data.startswith('cust_pack:'))
@@ -1112,11 +1227,18 @@ async def choose_pack(callback: CallbackQuery, state: FSMContext):
     pack = await api_client.get_user_template(template_id)
     meta = get_pack_meta(template_id)
     price = int(meta.get('price_amount') or 0)
-    if price <= 0 or not int(meta.get('is_visible', 1)):
+    product_id = meta.get('product_id')
+    if int(meta.get('use_product_price') or 0) and product_id:
+        price = public_price_for_pack(product_id, pack)
+    product_ok = bool(product_id and db.fetchone('SELECT 1 AS ok FROM products WHERE id=? AND is_active=1', (int(product_id),)))
+    if price <= 0 or not int(meta.get('is_visible', 1)) or not product_ok:
         await callback.answer('این بسته در حال حاضر قابل خرید نیست.', show_alert=True)
         return
+    product = db.product_for_template(template_id) or {}
     await state.set_state(CustomerBuyState.waiting_username)
     await state.update_data(
+        product_id=str(product.get('id') or ''),
+        product_name=str(product.get('name') or 'نامشخص'),
         package_id=str(template_id),
         package_name=pack_title(pack),
         price_toman=price,
@@ -1126,6 +1248,7 @@ async def choose_pack(callback: CallbackQuery, state: FSMContext):
         renew_service_id=None,
         order_type='new',
     )
+    meta = dict(meta); meta['price_amount'] = price
     prompt_text, prompt_template, prompt_context = username_rules_text(pack, meta, callback.from_user)
     # This page must expose the ORIGINAL template and all package values in live edit
     # mode. In particular package name/price/volume/duration are real variables instead
@@ -1694,6 +1817,8 @@ async def choose_renew_pack(callback: CallbackQuery, state: FSMContext):
     pack = await api_client.get_user_template(template_id)
     meta = get_pack_meta(template_id)
     price = int(meta.get('price_amount') or 0)
+    if int(meta.get('use_product_price') or 0) and meta.get('product_id'):
+        price = public_price_for_pack(meta.get('product_id'), pack)
     if price <= 0 or not int(meta.get('is_visible', 1)):
         await callback.answer('این بسته برای تمدید در دسترس نیست.', show_alert=True)
         return
@@ -1865,9 +1990,9 @@ async def customer_referral(message: Message, bot):
     user_id = message.from_user.id if message.from_user else None
     stats = db.referral_stats(user_id)
     me = await bot.get_me()
-    reward = int(db.get_setting('referral_reward_toman', 0) or 0)
-    condition = db.get_setting('referral_condition', 'payment')
-    condition_text = 'بعد از پرداخت دعوت شده' if condition == 'payment' else 'بعد از ورود با لینک'
+    reward = db.referral_reward_amount()
+    condition = db.referral_condition()
+    condition_text = 'بعد از خرید موفق بسته' if condition == 'purchase' else 'بعد از ورود با لینک'
     link = f'https://t.me/{me.username}?start=ref_{user_id}'
     await message.answer(
         '👥 دعوت دوستان\n\n'
@@ -1882,13 +2007,24 @@ async def customer_referral(message: Message, bot):
     )
 
 
+async def _test_service_page_text(bot, user, product: dict | None = None) -> str:
+    template = str(db.get_setting('test_service_text', '🧪 سرویس تست') or '🧪 سرویس تست')
+    support = str(db.get_setting('support_username', '') or '')
+    context = user_template_context(user, support=support)
+    context.update({
+        'product_id': (product or {}).get('id', ''),
+        'product_name': (product or {}).get('name', ''),
+    })
+    return await render_template_html(bot, template, context)
+
+
 @customer_router.message(CustomerButtonFilter('test_service'))
 async def customer_test_service(message: Message):
     if not bool(db.get_setting('test_service_enabled', True)):
         await message.answer('فعلا سرویس تست غیرفعال است.', reply_markup=customer_keyboard())
         return
-    template_id = db.get_setting('test_template_id', None)
-    if not template_id:
+    rows = test_products()
+    if not rows:
         await message.answer('فعلا سرویس تست توسط ادمین فعال نشده است.', reply_markup=customer_keyboard())
         return
     eligible, remaining = db.test_service_eligibility(message.from_user.id)
@@ -1900,19 +2036,45 @@ async def customer_test_service(message: Message):
             msg = 'شما قبلا سرویس تست را دریافت کرده اید.'
         await message.answer(msg, reply_markup=customer_keyboard())
         return
-    await message.answer(
-        '🧪 سرویس تست\n\nبرای دریافت سرویس تست روی دکمه زیر بزنید.',
-        reply_markup=test_service_keyboard(),
-    )
+    if len(rows) == 1:
+        page = await _test_service_page_text(message.bot, message.from_user, rows[0])
+        await message.answer(page + f"\n\n🛍 محصول: {html.escape(str(rows[0]['name']))}\nبرای دریافت سرویس تست روی دکمه زیر بزنید.", reply_markup=test_service_keyboard(int(rows[0]['id'])), parse_mode='HTML')
+        return
+    page = await _test_service_page_text(message.bot, message.from_user)
+    await message.answer(page + '\n\nمحصول موردنظر برای تست را انتخاب کنید:', reply_markup=test_products_keyboard(rows), parse_mode='HTML')
 
 
-@customer_router.callback_query(F.data == 'cust_test_get')
+@customer_router.callback_query(F.data.startswith('cust_test_product:'))
+async def customer_test_product(callback: CallbackQuery):
+    product_id = int(callback.data.split(':')[-1])
+    row = db.fetchone('''SELECT p.*, pt.template_id FROM products p JOIN product_test_templates pt ON pt.product_id=p.id WHERE p.id=? AND p.is_active=1''', (product_id,))
+    if not row:
+        await callback.answer('تست این محصول فعال نیست.', show_alert=True); return
+    eligible, remaining = db.test_service_eligibility(callback.from_user.id)
+    if not eligible:
+        days=max(1, math.ceil(remaining/86400)) if remaining>0 else 0
+        await callback.answer(f'حدود {days} روز دیگر دوباره می توانید سرویس تست بگیرید.' if days else 'شما قبلا سرویس تست را گرفته اید.', show_alert=True); return
+    page = await _test_service_page_text(callback.bot, callback.from_user, row)
+    await edit_or_answer(callback, page + f"\n\n🛍 محصول: {html.escape(str(row['name']))}\nبرای دریافت سرویس تست روی دکمه زیر بزنید.", reply_markup=test_service_keyboard(product_id), parse_mode='HTML')
+    await callback.answer()
+
+
+@customer_router.callback_query(F.data.startswith('cust_test_get'))
 async def customer_test_get(callback: CallbackQuery):
     user_id = callback.from_user.id
-    template_id = db.get_setting('test_template_id', None)
-    if not template_id:
+    parts = callback.data.split(':', 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        product_id = int(parts[1])
+        row = db.fetchone('''SELECT p.name, pt.template_id FROM products p JOIN product_test_templates pt ON pt.product_id=p.id WHERE p.id=? AND p.is_active=1''', (product_id,))
+    else:
+        row = None
+        legacy = db.get_setting('test_template_id', None)
+        if legacy:
+            row = {'name': 'سرویس تست', 'template_id': legacy}
+    if not row:
         await callback.answer('سرویس تست فعال نیست.', show_alert=True)
         return
+    template_id = str(row['template_id'])
     eligible, remaining = db.test_service_eligibility(user_id)
     if not eligible:
         if remaining > 0:
@@ -1924,9 +2086,7 @@ async def customer_test_get(callback: CallbackQuery):
         return
     try:
         template = await api_client.get_user_template(template_id)
-        last_error = None
-        created_user = None
-        actual_username = None
+        last_error = None; created_user = None; actual_username = None
         for _ in range(12):
             raw_username = await api_client.generate_unique_test_username(template)
             actual_username = api_client.apply_template_username(template, raw_username)
@@ -1944,27 +2104,16 @@ async def customer_test_get(callback: CallbackQuery):
         if created_user is None or actual_username is None:
             raise RuntimeError(f'نام تست یکتا ساخته نشد: {last_error}')
         links, user_data, sub_url = await api_client.get_user_config_links(actual_username)
-        if not user_data:
-            user_data = created_user
+        if not user_data: user_data = created_user
         sub_url = sub_url or api_client.extract_subscription_url(created_user)
-        if not links:
-            links = api_client.extract_config_links(created_user)
-        service_id = db.save_user_service(
-            telegram_id=user_id,
-            order_id=None,
-            package_id=str(template_id),
-            package_name='سرویس تست',
-            service_username=actual_username,
-            user_data=user_data or created_user,
-            subscription_url=sub_url,
-            links=links,
-        )
+        if not links: links = api_client.extract_config_links(created_user)
+        service_id = db.save_user_service(telegram_id=user_id, order_id=None, package_id=template_id, package_name=f"سرویس تست - {row['name']}", service_username=actual_username, user_data=user_data or created_user, subscription_url=sub_url, links=links)
         db.mark_test_used(user_id, service_id)
         saved_service = db.get_user_service(service_id, user_id) or {'service_username': actual_username, 'subscription_url': sub_url}
         await edit_or_answer(callback, f'سرویس تست ساخته شد ✅\n\nنام سرویس: {copy_code(actual_username)}', parse_mode='Markdown')
         await send_subscription_delivery(callback.message, saved_service, sub_url=sub_url, title='🔗 لینک اشتراک سرویس تست')
         await callback.answer('ساخته شد.')
-    except Exception as exc:
+    except Exception:
         await safe_callback_answer(callback, 'خطا در ساخت سرویس تست. جزئیات کامل در بخش خطاهای سیستم ثبت شد.', show_alert=True)
 
 @customer_router.message(CustomerButtonFilter('wallet'))

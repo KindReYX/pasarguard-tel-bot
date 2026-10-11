@@ -93,7 +93,7 @@ def users_by_filter(filter_key: str, *, limit: int | None = None, offset: int = 
                    FROM user_services t
                    JOIN bot_users b ON b.telegram_id=t.telegram_id
                    WHERE t.is_active=1 AND b.is_active=1 AND b.is_blocked=0
-                     AND t.order_id IS NULL AND t.package_name='سرویس تست'
+                     AND t.order_id IS NULL AND t.package_name LIKE 'سرویس تست%'
                      AND {exp_t} > 0 AND {exp_t} <= CAST(strftime('%s','now') AS INTEGER)
                      AND NOT EXISTS (
                          SELECT 1 FROM user_services a
@@ -103,7 +103,7 @@ def users_by_filter(filter_key: str, *, limit: int | None = None, offset: int = 
                      AND NOT EXISTS (
                          SELECT 1 FROM user_services n
                          WHERE n.telegram_id=t.telegram_id
-                           AND NOT (n.order_id IS NULL AND n.package_name='سرویس تست')
+                           AND NOT (n.order_id IS NULL AND n.package_name LIKE 'سرویس تست%')
                      )
                      AND NOT EXISTS (
                          SELECT 1 FROM orders o
@@ -157,14 +157,14 @@ def users_count_by_filter(filter_key: str) -> int:
         row = db.fetchone(f'''SELECT COUNT(DISTINCT t.telegram_id) AS c
             FROM user_services t JOIN bot_users b ON b.telegram_id=t.telegram_id
             WHERE t.is_active=1 AND b.is_active=1 AND b.is_blocked=0
-              AND t.order_id IS NULL AND t.package_name='سرویس تست'
+              AND t.order_id IS NULL AND t.package_name LIKE 'سرویس تست%'
               AND {exp_t} > 0 AND {exp_t} <= CAST(strftime('%s','now') AS INTEGER)
               AND NOT EXISTS (SELECT 1 FROM user_services a
                   WHERE a.telegram_id=t.telegram_id AND a.is_active=1
                     AND {exp_a} > CAST(strftime('%s','now') AS INTEGER))
               AND NOT EXISTS (SELECT 1 FROM user_services n
                   WHERE n.telegram_id=t.telegram_id
-                    AND NOT (n.order_id IS NULL AND n.package_name='سرویس تست'))
+                    AND NOT (n.order_id IS NULL AND n.package_name LIKE 'سرویس تست%'))
               AND NOT EXISTS (SELECT 1 FROM orders o
                   WHERE o.user_id=t.telegram_id
                     AND o.status IN ('paid','build_queued','building_service','service_ready'))''')

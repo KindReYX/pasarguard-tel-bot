@@ -251,7 +251,8 @@ async def _send_expire_warning(bot: Bot, service: dict, seconds: int, expire: in
     days = max(0, math.ceil(max(0, seconds) / 86400))
     hours = max(0, math.ceil(max(0, seconds) / 3600))
     template = str(db.get_setting('renew_warning_text', RENEW_WARNING_DEFAULT) or RENEW_WARNING_DEFAULT)
-    context = {
+    context = db.product_context_for_template(service.get('package_id'))
+    context.update({
         'name': str(user.get('first_name') or user.get('username') or uid),
         'first_name': str(user.get('first_name') or ''),
         'username': ('@' + str(user.get('username'))) if user.get('username') else '',
@@ -264,7 +265,7 @@ async def _send_expire_warning(bot: Bot, service: dict, seconds: int, expire: in
         'remaining_time': _remaining_text(seconds),
         'expire_at': _warning_expire_at(expire),
         'support': support,
-    }
+    })
     text = await render_template_html(bot, template, context)
     await bot.send_message(uid, text, parse_mode='HTML')
 
@@ -338,14 +339,17 @@ async def test_service_reminder_loop(bot: Bot) -> None:
                         if not uid:
                             continue
                         user = db.fetchone('SELECT * FROM bot_users WHERE telegram_id=?', (uid,)) or {}
-                        context = {
+                        service = db.fetchone('SELECT package_id, package_name FROM user_services WHERE id=?', (int(row.get('service_id') or 0),)) if row.get('service_id') else None
+                        context = db.product_context_for_template((service or {}).get('package_id'))
+                        context.update({
+                            'package_name': str((service or {}).get('package_name') or 'نامشخص'),
                             'name': str(user.get('first_name') or user.get('username') or uid),
                             'first_name': str(user.get('first_name') or ''),
                             'username': ('@' + str(user.get('username'))) if user.get('username') else '',
                             'user_id': uid,
                             'cooldown_days': cooldown_days,
                             'support': support,
-                        }
+                        })
                         try:
                             text = await render_template_html(bot, template, context)
                             await bot.send_message(uid, text, parse_mode='HTML')

@@ -75,13 +75,46 @@ esac
 OLD_SHA="$(run_as_service git -C "$PROJECT_DIR" rev-parse HEAD)"
 write_progress starting 5
 
-# All project-controlled Python/git commands run as the service user, never as root.
+# Back up the live DB before touching code or schema. Keep the exact backup path
+# so a failed migration can restore both code and data atomically.
 write_progress backup 15
 if [ -x "$PROJECT_DIR/venv/bin/python" ]; then
-  run_project_shell 'venv/bin/python scripts/db_backup.py'
+  BACKUP_OUTPUT="$(run_project_shell 'venv/bin/python scripts/db_backup.py')"
 else
-  run_project_shell 'python3 scripts/db_backup.py'
+  BACKUP_OUTPUT="$(run_project_shell 'python3 scripts/db_backup.py')"
 fi
+BACKUP_PATH="$(printf '%s\n' "$BACKUP_OUTPUT" | tail -n 1)"
+if [ -n "$BACKUP_PATH" ] && [ ! -f "$BACKUP_PATH" ]; then BACKUP_PATH=""; fi
+
+# Schema migrations must never run while the bot is serving requests.
+WAS_ACTIVE=0
+if systemctl is-active --quiet "$SERVICE_NAME"; then WAS_ACTIVE=1; fi
+write_progress stop 22
+systemctl stop "$SERVICE_NAME" || true
+UPDATE_FINISHED=0
+emergency_cleanup() {
+  if [ "$UPDATE_FINISHED" -eq 0 ] && [ "$WAS_ACTIVE" -eq 1 ] && ! systemctl is-active --quiet "$SERVICE_NAME"; then
+    systemctl start "$SERVICE_NAME" >/dev/null 2>&1 || true
+  fi
+}
+trap emergency_cleanup EXIT
+
+restore_database_backup() {
+  [ -n "${BACKUP_PATH:-}" ] || return 0
+  local db_path
+  db_path="$(grep -E '^DB_PATH=' "$PROJECT_DIR/.env" | tail -1 | cut -d= -f2- || true)"
+  db_path="${db_path:-bot.db}"
+  case "$db_path" in /*) ;; *) db_path="$PROJECT_DIR/$db_path" ;; esac
+  python3 - "$BACKUP_PATH" <<'PYRESTORE'
+import sqlite3, sys
+p=sys.argv[1]
+c=sqlite3.connect(p); r=c.execute('PRAGMA integrity_check').fetchone(); c.close()
+if not r or str(r[0]).lower() != 'ok': raise SystemExit(f'backup integrity failed: {r}')
+PYRESTORE
+  cp -f "$BACKUP_PATH" "$db_path"
+  rm -f "${db_path}-wal" "${db_path}-shm"
+  chown "$SERVICE_USER:$(id -gn "$SERVICE_USER")" "$db_path" 2>/dev/null || true
+}
 
 write_progress fetch 30
 run_as_service git -C "$PROJECT_DIR" fetch --tags --force origin
@@ -91,6 +124,8 @@ if ! run_as_service git -C "$PROJECT_DIR" rev-parse -q --verify "refs/tags/$TAG^
 fi
 TARGET_SHA="$(run_as_service git -C "$PROJECT_DIR" rev-parse "refs/tags/$TAG^{commit}")"
 if [ "$TARGET_SHA" = "$OLD_SHA" ]; then
+  if [ "$WAS_ACTIVE" -eq 1 ]; then systemctl start "$SERVICE_NAME" || true; fi
+  UPDATE_FINISHED=1
   write_status success "Already on requested release"
   exit 0
 fi
@@ -107,6 +142,9 @@ fi
 ACTUAL_VERSION="$(run_project_shell "$PYTHON -c 'from version import __version__; print(__version__)'" 2>/dev/null || true)"
 if [ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]; then
   run_as_service git -C "$PROJECT_DIR" reset --hard "$OLD_SHA"
+  restore_database_backup || true
+  if [ "$WAS_ACTIVE" -eq 1 ]; then systemctl start "$SERVICE_NAME" || true; fi
+  UPDATE_FINISHED=1
   write_status failed "version.py does not match release tag"
   echo "version.py ($ACTUAL_VERSION) does not match $TAG" >&2
   exit 7
@@ -118,11 +156,11 @@ update_runtime() {
     return 1
   fi
   write_progress dependencies 70
-  run_project_shell 'venv/bin/python -m pip install -r requirements.txt'
+  run_project_shell 'venv/bin/python -m pip install -r requirements.txt' || return 1
   write_progress compile 82
-  run_project_shell 'venv/bin/python -W error::SyntaxWarning -m py_compile ./*.py modules/*.py scripts/*.py'
+  run_project_shell 'venv/bin/python -W error::SyntaxWarning -m py_compile ./*.py modules/*.py scripts/*.py' || return 1
   write_progress migrate 90
-  run_project_shell 'venv/bin/python scripts/preflight.py --migrate'
+  run_project_shell 'venv/bin/python scripts/preflight.py --migrate' || return 1
 }
 
 if update_runtime; then
@@ -131,6 +169,7 @@ if update_runtime; then
   sleep 3
   if systemctl is-active --quiet "$SERVICE_NAME"; then
     write_progress success 100
+    UPDATE_FINISHED=1
     write_status success "Updated from $OLD_SHA to $TARGET_SHA"
     exit 0
   fi
@@ -140,6 +179,7 @@ ERROR_MSG="update failed; rolling back to $OLD_SHA"
 write_progress rollback 92 "$ERROR_MSG"
 echo "$ERROR_MSG" >&2
 run_as_service git -C "$PROJECT_DIR" reset --hard "$OLD_SHA"
+restore_database_backup || true
 if update_runtime; then
   write_progress restart 96
   systemctl restart "$SERVICE_NAME" || true
@@ -152,4 +192,5 @@ else
   write_progress failed 100 "$ERROR_MSG; rollback restart also failed - manual intervention required"
   write_status failed "$ERROR_MSG; rollback restart also failed - manual intervention required"
 fi
+UPDATE_FINISHED=1
 exit 8

@@ -702,6 +702,7 @@ async def _complete_order(bot: Bot, receipt: dict) -> tuple[bool, str, str | Non
             class U: pass
             u=U(); u.id=final['user_id']; u.first_name=user_row.get('first_name') or ''; u.username=user_row.get('username') or ''
             ctx = user_template_context(u, support=str(db.get_setting('support_username', '') or ''))
+            ctx.update(db.product_context_for_template(final.get('package_id')))
             ctx.update({'order_id': order_id, 'package_name': final.get('package_name',''), 'service_name': final.get('customer_username',''), 'price': final.get('amount_toman') or 0})
             rendered = await render_template_html(bot, after_purchase, ctx)
             await bot.send_message(int(final['user_id']), rendered, parse_mode='HTML', reply_markup=customer_keyboard())

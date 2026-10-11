@@ -22,6 +22,8 @@ from modules.users import users_router
 from modules.orders import orders_router
 from modules.reports import reports_router
 from modules.packs import packs_router
+from modules.products import products_router
+from modules.custom_packages import custom_packages_router
 from modules.coupons import coupons_router
 from modules.wallet import wallet_router
 from modules.stars import stars_router
@@ -75,7 +77,7 @@ async def start_handler(message: Message, bot: Bot):
             ref_id = parts[1].replace('ref_', '', 1).strip()
             if ref_id.isdigit():
                 created = db.create_referral(int(ref_id), user.id)
-                if created and db.get_setting('referral_condition', 'payment') == 'join':
+                if created and db.referral_condition() == 'join':
                     db.process_referral_reward(user.id, reason='join')
         if len(parts) > 1 and parts[1].lower().startswith('ad_'):
             # Case-insensitive ad attribution; keep original suffix case then normalize in db
@@ -209,6 +211,8 @@ async def main() -> None:
         users_router,
         orders_router,
         reports_router,
+        custom_packages_router,
+        products_router,
         packs_router,
         coupons_router,
         wallet_router,
@@ -241,6 +245,37 @@ async def main() -> None:
         start_background_tasks(bot)
     except Exception:
         logging.exception('Could not start background tasks')
+
+    # Warm panel caches in the background. This includes individual template
+    # details so opening a package does not pay the panel's cold-request cost.
+    async def _warm_panel_caches() -> None:
+        try:
+            import api_client
+            results = await asyncio.gather(
+                api_client.get_user_templates(),
+                api_client.get_groups(),
+                return_exceptions=True,
+            )
+            templates = results[0] if results and isinstance(results[0], list) else []
+            semaphore = asyncio.Semaphore(3)
+
+            async def _warm_template(template_id) -> None:
+                async with semaphore:
+                    try:
+                        await api_client.get_user_template(template_id)
+                    except Exception:
+                        pass
+
+            ids = [
+                item.get('id') for item in templates
+                if isinstance(item, dict) and item.get('id') is not None
+            ]
+            if ids:
+                await asyncio.gather(*(_warm_template(template_id) for template_id in ids))
+        except Exception:
+            logging.debug('Panel cache warmup failed', exc_info=True)
+
+    asyncio.create_task(_warm_panel_caches())
 
     try:
         from modules.payment_webhook import start_payment_webhook_server

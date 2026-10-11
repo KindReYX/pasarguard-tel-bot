@@ -180,6 +180,14 @@ async def main() -> None:
     validate_settings()
     logging.basicConfig(level=logging.INFO)
     db.init_db()
+    try:
+        migrated = edit_runtime.migrate_all_legacy_live_edit_settings()
+        if migrated.get('texts') or migrated.get('stickers'):
+            logging.info('Stable live-edit migration: %s', migrated)
+    except Exception:
+        # Never block bot startup because of a compatibility migration. Old keys
+        # remain untouched and lazy read-through migration is still available.
+        logging.exception('Stable live-edit migration failed; continuing with legacy fallbacks')
     db.seed_roles_from_env()
     install_button_style_patch()
     install_edit_mode_output_patch()

@@ -244,6 +244,12 @@ async def trigger_update(tag: str, *, actor_id: int | None = None, automatic: bo
     db.set_setting("github_update_in_progress_version", normalized)
     db.set_setting("github_update_started_at", db.now_iso())
     db.set_setting("github_update_started_by", "auto" if automatic else int(actor_id or 0))
+    # Remove stale progress from an older attempt. The real worker recreates it as
+    # soon as the transient systemd unit starts.
+    try:
+        PROGRESS_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
     tag_arg = f"v{normalized}"
     cmd = [UPDATE_HELPER, tag_arg] if os.geteuid() == 0 else ["sudo", "-n", UPDATE_HELPER, tag_arg]
     try:
@@ -257,6 +263,19 @@ async def trigger_update(tag: str, *, actor_id: int | None = None, automatic: bo
         db.set_setting("github_update_in_progress_version", "")
         raise
     if proc.returncode != 0:
+        # systemd may stop the bot service immediately after the transient updater
+        # unit has been accepted. In that narrow window the launcher process can
+        # return non-zero even though the independent worker is already running.
+        # Trust a fresh progress file for this exact tag instead of showing a false
+        # failure and then a contradictory success message a few seconds later.
+        await asyncio.sleep(0.4)
+        progress = _read_progress_file()
+        try:
+            progress_matches = bool(progress) and normalize_version(str(progress.get("tag") or "")) == normalized
+        except Exception:
+            progress_matches = False
+        if progress_matches:
+            return
         db.set_setting("github_update_in_progress_version", "")
         detail = (stderr or stdout or b"").decode("utf-8", "replace").strip()
         raise RuntimeError(detail or "اجرای helper بروزرسانی ناموفق بود.")

@@ -212,6 +212,10 @@ async def announce_update_result(bot: Bot) -> None:
     target_message = int(db.get_setting("github_update_progress_message_id", 0) or 0)
     target_version = str(db.get_setting("github_update_progress_version", "") or "")
     if state == "success":
+        # Keep the update settings page in sync with the release that was
+        # actually installed, even if the periodic GitHub check has not run yet.
+        db.set_setting("github_update_latest_version", normalized_tag)
+        db.set_setting("github_update_last_success_version", normalized_tag)
         text = _progress_text(normalized_tag, "success", 100)
     else:
         text = _progress_text(normalized_tag, "failed", 100, detail)
@@ -330,17 +334,58 @@ def _check_due() -> bool:
         return True
 
 
+async def _resume_update_progress_after_restart(bot: Bot) -> bool:
+    """Resume the Telegram progress message after systemd restarts the bot.
+
+    The original monitor task necessarily dies when the updater stops the bot.
+    Progress metadata is persisted in SQLite, so the freshly started process can
+    attach to the same message and continue from the worker's progress file.
+    Returns True while an update is still considered active.
+    """
+    target_chat = int(db.get_setting("github_update_progress_chat_id", 0) or 0)
+    target_message = int(db.get_setting("github_update_progress_message_id", 0) or 0)
+    target_version = str(db.get_setting("github_update_progress_version", "") or "")
+    pending = str(db.get_setting("github_update_in_progress_version", "") or "")
+    version = target_version or pending
+    if not (target_chat and target_message and version):
+        return bool(pending)
+    try:
+        normalized = normalize_version(version)
+    except Exception:
+        return bool(pending)
+    data = _read_progress_file()
+    if data:
+        try:
+            same_tag = normalize_version(str(data.get("tag") or "")) == normalized
+        except Exception:
+            same_tag = False
+        if same_tag:
+            step = str(data.get("step") or "starting")
+            percent = int(data.get("percent") or _PROGRESS_STEPS.get(step, (0, ""))[0])
+            detail = str(data.get("detail") or "")
+            await _edit_progress_message(bot, target_chat, target_message, normalized, step, percent, detail)
+    return True
+
+
 async def github_update_loop(bot: Bot) -> None:
-    await asyncio.sleep(8)
+    # Start quickly: after an update the old monitor task has been killed with
+    # the bot service, so the new process must reattach to the saved message.
+    await asyncio.sleep(2)
     while True:
+        sleep_for = LOOP_INTERVAL_SECONDS
         try:
             await announce_update_result(bot)
-            if bool(db.get_setting("github_auto_check_enabled", True)) and _check_due():
+            update_active = await _resume_update_progress_after_restart(bot)
+            if update_active:
+                # The updater worker writes progress/status independently of the
+                # bot. Poll frequently until its terminal status is consumed.
+                sleep_for = 2
+            elif bool(db.get_setting("github_auto_check_enabled", True)) and _check_due():
                 await check_for_updates(bot)
         except Exception as exc:
             db.set_setting("github_update_last_error", str(exc))
             db.record_system_error("tasks.github_update_loop", str(exc), error_type=type(exc).__name__)
-        await asyncio.sleep(LOOP_INTERVAL_SECONDS)
+        await asyncio.sleep(sleep_for)
 
 
 @updater_router.callback_query(F.data == "ghupd:check")

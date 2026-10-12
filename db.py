@@ -2021,10 +2021,14 @@ def create_invoice_text(order: dict[str, Any], service_message: str = '') -> str
         'custom_months': _html_text(product_ctx.get('custom_months') or '-'),
         'custom_users': _html_text(product_ctx.get('custom_users') or '-'),
         'order_id': _html_code(order.get('id')),
+        # Backward-compatible aliases used by older/custom invoice templates.
+        # Keep these aliases indefinitely so user-authored texts survive code updates.
+        'entity_id': _html_code(order.get('id')),
         'user_id': _html_code(order.get('user_id')),
         'package_id': _html_text(order.get('package_id') or '-'),
         'package_name': _html_text(order.get('package_name') or '-'),
         'service_name': _html_code(order.get('customer_username') or '-'),
+        'customer_username': _html_code(order.get('customer_username') or '-'),
         'price': f'{amount:,} تومان',
         'price_raw': str(amount),
         'amount': f'{amount:,} تومان',
@@ -2036,6 +2040,7 @@ def create_invoice_text(order: dict[str, Any], service_message: str = '') -> str
         'payable_raw': str(payable),
         'stars': f'{stars:,}',
         'status': _html_text(order.get('status') or '-'),
+        'final_status': _html_text(order.get('status') or '-'),
         'created_at': _html_code(order.get('created_at') or '-'),
         'service_message': html.escape(str(service_message or '')),
         'sub_link': _html_code(sub_link),

@@ -194,17 +194,70 @@ async def request_text(method: str, path: str, params: dict | None = None, paylo
     raise last_exc or RuntimeError('Unknown text API error')
 
 
+async def _hydrate_public_priced_templates(templates: list[dict]) -> list[dict]:
+    """Ensure public-priced templates have the fields required to calculate price.
+
+    The panel's /simple endpoint may omit data_limit. Public per-GB pricing needs
+    data_limit, and treating a missing field as zero makes an otherwise valid
+    package disappear from the customer purchase list. Only templates that are
+    configured to use product public pricing are hydrated, with small bounded
+    concurrency and the existing detail cache/stale fallback.
+    """
+    if not isinstance(templates, list) or not templates:
+        return templates
+    try:
+        rows = db.fetchall(
+            'SELECT template_id FROM package_settings WHERE use_product_price=1 AND is_visible=1'
+        )
+        needed = {str(r.get('template_id')) for r in rows if r.get('template_id') is not None}
+    except Exception:
+        return templates
+    if not needed:
+        return templates
+
+    by_id = {str(t.get('id')): t for t in templates if isinstance(t, dict) and t.get('id') is not None}
+    missing = [tid for tid in needed if tid in by_id and int(by_id[tid].get('data_limit') or 0) <= 0]
+    if not missing:
+        return templates
+
+    sem = asyncio.Semaphore(4)
+
+    async def load_one(tid: str):
+        async with sem:
+            try:
+                detail = await get_user_template(tid)
+                return tid, detail if isinstance(detail, dict) else None
+            except Exception:
+                return tid, None
+
+    results = await asyncio.gather(*(load_one(tid) for tid in missing))
+    for tid, detail in results:
+        if not detail:
+            continue
+        base = by_id.get(tid)
+        if base is None:
+            continue
+        # Preserve any list-specific fields while filling full template fields.
+        merged = dict(detail)
+        merged.update(base)
+        if int(merged.get('data_limit') or 0) <= 0 and int(detail.get('data_limit') or 0) > 0:
+            merged['data_limit'] = detail.get('data_limit')
+        base.clear()
+        base.update(merged)
+    return await _hydrate_public_priced_templates(templates)
+
+
 async def get_user_templates() -> list[dict]:
-    # L1 first
+    # L1 first. Even cached simple lists are hydrated for public-priced packs.
     l1 = _l1_get('panel:user_templates:simple')
     if l1 is not None:
-        return l1
+        return await _hydrate_public_priced_templates(l1)
     try:
         import db
         cached = db.cache_get('panel:user_templates:simple')
         if cached is not None:
             _l1_set('panel:user_templates:simple', cached, 20)
-            return cached
+            return await _hydrate_public_priced_templates(cached)
     except Exception:
         pass
     try:
@@ -218,7 +271,7 @@ async def get_user_templates() -> list[dict]:
             stale = db.cache_get('panel:user_templates:last_good')
             if isinstance(stale, list):
                 _l1_set('panel:user_templates:simple', stale, 10)
-                return stale
+                return await _hydrate_public_priced_templates(stale)
         except Exception:
             pass
         raise

@@ -693,6 +693,20 @@ async def pack_public_price_toggle(callback: CallbackQuery):
     if not meta.get('product_id'):
         await callback.answer('این بسته به محصولی وصل نیست.', show_alert=True); return
     new_value = 0 if int(meta.get('use_product_price') or 0) else 1
+    if new_value:
+        product = db.fetchone('SELECT public_price_amount FROM products WHERE id=?', (int(meta.get('product_id')),)) or {}
+        per_gb = int(product.get('public_price_amount') or 0)
+        if per_gb <= 0:
+            await callback.answer('اول قیمت عمومی هر گیگ این محصول را روی عدد بیشتر از صفر تنظیم کنید.', show_alert=True)
+            return
+        try:
+            pack = await api_client.get_user_template(template_id)
+        except Exception as exc:
+            await callback.answer(f'جزئیات بسته از پنل دریافت نشد؛ قیمت عمومی فعال نشد. {type(exc).__name__}', show_alert=True)
+            return
+        if pack_volume_gb(pack) <= 0:
+            await callback.answer('حجم این بسته در پنل صفر یا نامعتبر است؛ قیمت عمومی فعال نشد.', show_alert=True)
+            return
     upsert_pack_meta(template_id, use_product_price=new_value)
     pack = await api_client.get_user_template(template_id)
     await edit_or_answer(callback, detail_text(pack), reply_markup=detail_keyboard(template_id, True))

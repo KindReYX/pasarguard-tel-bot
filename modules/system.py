@@ -1,5 +1,6 @@
 from __future__ import annotations
 import html
+import json
 import sqlite3
 from pathlib import Path
 from aiogram import F, Router
@@ -24,6 +25,7 @@ def errors_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text='🔄 بروزرسانی خطاها', callback_data='system:errors:list')],
         [InlineKeyboardButton(text='✅ حل شده کردن همه خطاها', callback_data='system:errors:resolve_all')],
+        [InlineKeyboardButton(text='🧨 صفر کردن کامل خطاها', callback_data='system:errors:reset_confirm')],
     ])
 
 
@@ -47,6 +49,7 @@ def system_errors_keyboard(limit: int = 12) -> InlineKeyboardMarkup:
     keyboard.append([InlineKeyboardButton(text='🔄 بروزرسانی خطاها', callback_data='system:errors:list')])
     keyboard.append([InlineKeyboardButton(text='✅ حل شده کردن همه خطاها', callback_data='system:errors:resolve_all')])
     keyboard.append([InlineKeyboardButton(text='🗑 حذف خطاهای حل شده', callback_data='system:errors:delete_resolved_confirm')])
+    keyboard.append([InlineKeyboardButton(text='🧨 صفر کردن کامل خطاها', callback_data='system:errors:reset_confirm')])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
@@ -64,10 +67,41 @@ def build_system_errors_text(limit: int = 12) -> str:
     )
 
 
+def _format_error_details(raw) -> str:
+    if not raw:
+        return '-'
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return str(raw)
+    if not isinstance(data, dict):
+        return str(data)
+    labels = {
+        'diagnosis': 'تشخیص', 'suggestion': 'پیشنهاد بررسی', 'diagnostic_code': 'کد تشخیص',
+        'stage': 'مرحله عملیات', 'root_error_type': 'نوع خطای اصلی', 'root_error': 'خطای خام',
+        'panel_status': 'HTTP پنل', 'order_id': 'شماره سفارش', 'package_id': 'شناسه بسته',
+        'order_type': 'نوع سفارش', 'attempt': 'تلاش', 'max_attempts': 'حداکثر تلاش', 'retrying': 'تلاش مجدد خودکار',
+    }
+    preferred = ['diagnosis','suggestion','stage','root_error_type','root_error','panel_status','attempt','max_attempts','retrying','diagnostic_code']
+    lines = []
+    for key in preferred + [k for k in data if k not in preferred]:
+        if key not in data:
+            continue
+        value = data.get(key)
+        if value in (None, '', [], {}):
+            continue
+        if isinstance(value, (dict, list)):
+            value = json.dumps(value, ensure_ascii=False, default=str)
+        if isinstance(value, bool):
+            value = 'بله' if value else 'خیر'
+        lines.append(f'{labels.get(key, key)}: {value}')
+    return '\n'.join(lines) if lines else '-'
+
+
 def build_error_detail_text(row) -> str:
     if not row:
         return 'خطا پیدا نشد.'
-    detail = row.get('details') or '-'
+    detail = _format_error_details(row.get('details'))
     message = row.get('message') or '-'
     text = (
         '🚨 جزئیات خطای سیستم\n\n'
@@ -79,7 +113,7 @@ def build_error_detail_text(row) -> str:
         f'موجودیت: {(row.get("entity_type") or "-")}:{(row.get("entity_id") or "-")}\n'
         f'زمان: {row.get("created_at") or "-"}\n\n'
         f'پیام:\n{message}\n\n'
-        f'جزئیات:\n{detail}'
+        f'تحلیل و جزئیات:\n{detail}'
     )
     if len(text) > 3600:
         text = text[:3600] + '\n\n… ادامه متن کوتاه شد تا تلگرام پیام را رد نکند.'
@@ -257,6 +291,32 @@ async def resolve_all_errors(callback: CallbackQuery):
     db.execute('UPDATE system_errors SET is_resolved=1 WHERE COALESCE(is_deleted, 0)=0')
     await callback.answer('همه خطاها حل شده شدند.', show_alert=True)
     await edit_or_answer(callback, build_system_errors_text(), reply_markup=system_errors_keyboard())
+
+
+@system_router.callback_query(F.data == 'system:errors:reset_confirm')
+async def system_errors_reset_confirm(callback: CallbackQuery):
+    if not is_super_admin(callback.from_user.id):
+        await deny_callback(callback); return
+    counts = db.system_errors_counts()
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f'⚠️ بله، {counts["total"]} خطا را صفر کن', callback_data='system:errors:reset_do')],
+        [InlineKeyboardButton(text='🔙 انصراف', callback_data='system:errors:list')],
+    ])
+    await edit_or_answer(callback, '🧨 صفر کردن کامل خطاها\n\nتمام رکوردهای خطا واقعاً حذف می‌شوند و شمارنده شناسه ریست می‌شود. بعد از صفر شدن تعداد خطاها ۰ است و اولین خطای جدید #1 خواهد بود.\n\nاین عملیات غیرقابل برگشت است.', reply_markup=kb)
+    await answer_callback(callback)
+
+
+@system_router.callback_query(F.data == 'system:errors:reset_do')
+async def system_errors_reset_do(callback: CallbackQuery):
+    if not is_super_admin(callback.from_user.id):
+        await deny_callback(callback); return
+    try:
+        deleted = db.reset_system_errors()
+        await answer_callback(callback, f'{deleted} خطا حذف شد و شمارنده صفر شد.', show_alert=True)
+        await edit_or_answer(callback, build_system_errors_text(), reply_markup=system_errors_keyboard())
+    except Exception as exc:
+        db.record_system_error('system.errors_reset', str(exc), user_id=callback.from_user.id, error_type=type(exc).__name__)
+        await answer_callback(callback, 'خطا در صفر کردن خطاها.', show_alert=True)
 
 def resolve_backup_file(preferred: Path) -> Path | None:
     """Return the preferred backup path if usable, else the newest valid one in the same dir."""

@@ -694,19 +694,26 @@ def consume_callback_bypass(callback_id: str) -> bool:
 
 
 def is_editor_internal_call() -> bool:
-    """True when an outgoing message originates from edit_mode.py itself."""
+    """True when an outgoing message originates from the live-editor UI itself.
+
+    This must be independent of the installation directory.  Older builds looked
+    for a literal ``/admin_bot_modular/`` path, so installing the exact same code
+    under e.g. ``/root/pasarguard-tel-bot`` made editor prompts editable again.
+    That recursively attached another "change this text" control to the editor's
+    own messages and could create many duplicate edit prompts.
+    """
     frame = inspect.currentframe()
     try:
         while frame:
             frame = frame.f_back
             if not frame:
                 break
-            filename = str(frame.f_code.co_filename).replace('\\', '/')
-            if '/admin_bot_modular/' not in filename:
+            rel = _project_relative_source(str(frame.f_code.co_filename))
+            if rel is None:
                 continue
-            if filename.endswith('/modules/edit_runtime.py') or filename.endswith('/utils.py'):
+            if rel in {'modules/edit_runtime.py', 'utils.py'}:
                 continue
-            return filename.endswith('/modules/edit_mode.py')
+            return rel == 'modules/edit_mode.py'
         return False
     finally:
         del frame

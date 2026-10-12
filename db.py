@@ -1720,14 +1720,84 @@ def reset_test_usage_for_all() -> None:
 
 
 # --- v14 safety, queue, cache and payment helpers ---
+def is_ignorable_system_error(message: Any, error_type: str | None = None) -> bool:
+    """Ignore expected Telegram delivery failures caused by users blocking the bot."""
+    text = f"{error_type or ''} {message or ''}".lower()
+    markers = (
+        'bot was blocked by the user',
+        'forbidden: bot was blocked',
+        'bot was blocked',
+        'blocked by user',
+    )
+    return any(marker in text for marker in markers)
+
+
+def diagnose_system_error(message: Any, error_type: str | None = None, source: str | None = None) -> dict[str, str]:
+    """Turn common low-level errors into an admin-friendly diagnosis."""
+    raw = str(message or '').strip()
+    low = f"{error_type or ''} {raw}".lower()
+    src = str(source or '').lower()
+    if any(x in low for x in ('timeout', 'timed out', 'timeouterror', 'asyncio.exceptions.timeouterror')):
+        return {'code': 'timeout', 'summary': '⏱ تایم‌اوت ارتباط با سرویس خارجی؛ پاسخ در زمان مقرر دریافت نشد.', 'suggestion': 'اتصال سرور به پنل/API را بررسی کنید. اگر موقتی باشد، صف ساخت سرویس خودکار دوباره تلاش می‌کند.'}
+    if any(x in low for x in ('name or service not known', 'temporary failure in name resolution', 'clientconnectordnserror', 'dns')):
+        return {'code': 'dns_error', 'summary': '🌐 خطای DNS؛ آدرس پنل/API resolve نشد.', 'suggestion': 'DNS سرور، دامنه پنل و دسترسی شبکه را بررسی کنید.'}
+    if any(x in low for x in ('connection refused', 'cannot connect', 'clientconnectorerror', 'connection reset', 'server disconnected', 'clientoserror')):
+        return {'code': 'connection_error', 'summary': '🔌 ارتباط شبکه با پنل/API برقرار نشد یا وسط درخواست قطع شد.', 'suggestion': 'وضعیت پنل، فایروال، پورت، SSL و اتصال شبکه سرور را بررسی کنید.'}
+    if '429' in low or 'too many requests' in low:
+        return {'code': 'rate_limit', 'summary': '🚦 سرویس مقصد Rate Limit داده است.', 'suggestion': 'کمی صبر کنید؛ سیستم برای خطاهای موقت دوباره تلاش می‌کند.'}
+    if any(code in low for code in ('502', '503', '504')):
+        return {'code': 'upstream_unavailable', 'summary': '🛑 پنل/API مقصد موقتاً در دسترس نیست یا Gateway خطا داده است.', 'suggestion': 'سلامت پنل و reverse proxy را بررسی کنید و چند دقیقه بعد دوباره تلاش کنید.'}
+    if '401' in low or 'unauthorized' in low:
+        return {'code': 'auth_error', 'summary': '🔐 احراز هویت پنل/API ناموفق است.', 'suggestion': 'نام کاربری، رمز عبور، توکن و دسترسی ادمین پنل را بررسی کنید.'}
+    if '403' in low or 'forbidden' in low:
+        return {'code': 'permission_error', 'summary': '⛔ سرویس مقصد درخواست را به‌دلیل مجوز ناکافی رد کرده است.', 'suggestion': 'سطح دسترسی حساب پنل/API را بررسی کنید.'}
+    if '404' in low or 'not found' in low:
+        return {'code': 'not_found', 'summary': '🔎 منبع موردنیاز در پنل/API پیدا نشد.', 'suggestion': 'شناسه بسته، سرویس یا مسیر API را بررسی کنید.'}
+    if '422' in low or 'validation' in low or 'unprocessable' in low:
+        return {'code': 'validation_error', 'summary': '🧩 پنل/API داده ارسالی را معتبر ندانسته است.', 'suggestion': 'جزئیات خام و تنظیمات بسته/قالب را بررسی کنید؛ یکی از فیلدهای ارسالی احتمالاً نامعتبر است.'}
+    if '500' in low or 'internal server error' in low:
+        return {'code': 'remote_server_error', 'summary': '💥 سرویس مقصد با خطای داخلی سرور پاسخ داده است.', 'suggestion': 'لاگ پنل/API مقصد را بررسی کنید.'}
+    if 'telegram' in src:
+        return {'code': 'telegram_error', 'summary': '📨 عملیات تلگرام با خطا مواجه شد.', 'suggestion': 'متن خام خطا را بررسی کنید. خطای بلاک‌کردن بات توسط کاربر در این لیست ذخیره نمی‌شود.'}
+    return {'code': 'unknown', 'summary': '⚠️ خطا به‌صورت خودکار دسته‌بندی نشد.', 'suggestion': 'منبع، مرحله و متن خام خطا را بررسی کنید.'}
+
+
 def record_system_error(source: str, message: str, user_id: int | None = None, entity_type: str | None = None,
                         entity_id: str | None = None, error_type: str | None = None, details: Any = None) -> None:
+    if is_ignorable_system_error(message, error_type):
+        return
+    raw_message = str(message or '').strip() or f'{error_type or "Error"}: exception message was empty'
+    diagnostic = diagnose_system_error(raw_message, error_type, source)
+    if isinstance(details, dict):
+        payload = dict(details)
+    elif details is None:
+        payload = {}
+    else:
+        payload = {'raw_details': details}
+    payload.setdefault('diagnostic_code', diagnostic['code'])
+    payload.setdefault('diagnosis', diagnostic['summary'])
+    payload.setdefault('suggestion', diagnostic['suggestion'])
     execute(
         """INSERT INTO system_errors (source, user_id, entity_type, entity_id, error_type, message, details, is_resolved, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)""",
-        (source, user_id, entity_type, entity_id, error_type, str(message)[:1500],
-         json.dumps(details, ensure_ascii=False, default=str) if details is not None else None, now_iso()),
+        (source, user_id, entity_type, entity_id, error_type, raw_message[:1500],
+         json.dumps(payload, ensure_ascii=False, default=str), now_iso()),
     )
+
+
+def reset_system_errors() -> int:
+    """Hard-delete every system error and reset the SQLite id sequence."""
+    with connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute('SELECT COUNT(*) AS c FROM system_errors').fetchone()
+        count = int(row['c'] if row else 0)
+        conn.execute('DELETE FROM system_errors')
+        try:
+            conn.execute("DELETE FROM sqlite_sequence WHERE name='system_errors'")
+        except sqlite3.OperationalError:
+            pass
+        conn.commit()
+        return count
 
 
 def recent_system_errors(limit: int = 30, unresolved_only: bool = False, include_deleted: bool = False) -> list[dict[str, Any]]:
@@ -1807,6 +1877,36 @@ def enqueue_service_job(order_id: int, job_type: str = 'create_or_renew_service'
         row = conn.execute('SELECT id FROM service_jobs WHERE order_id=?', (int(order_id),)).fetchone()
         conn.commit()
         return int(row['id']) if row else 0
+
+
+def prepare_service_job_manual_retry(order_id: int) -> int:
+    """Reset only the service-build job for a paid order and queue it immediately.
+
+    Financial/payment fields are intentionally untouched. This is safe to call
+    repeatedly because service_jobs has one row per order.
+    """
+    now = now_iso()
+    with connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute('SELECT id FROM service_jobs WHERE order_id=?', (int(order_id),)).fetchone()
+        if row:
+            job_id = int(row['id'])
+            conn.execute(
+                """UPDATE service_jobs
+                   SET status='queued', attempts=0, last_error=NULL, next_run_at=?, updated_at=?
+                   WHERE id=?""",
+                (now, now, job_id),
+            )
+        else:
+            cur = conn.execute(
+                """INSERT INTO service_jobs
+                   (order_id, job_type, status, attempts, max_attempts, next_run_at, created_at, updated_at)
+                   VALUES (?, 'create_or_renew_service', 'queued', 0, 5, ?, ?, ?)""",
+                (int(order_id), now, now, now),
+            )
+            job_id = int(cur.lastrowid)
+        conn.commit()
+        return job_id
 
 
 def next_service_jobs(limit: int = 5) -> list[dict[str, Any]]:

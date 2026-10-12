@@ -160,14 +160,17 @@ async def show_button_editor(message: Message, target: edit_runtime.ButtonTarget
         position = order.index(target.customer_button_id) + 1 if target.customer_button_id in order else '-'
         enabled = kb.customer_button_enabled(target.customer_button_id)
         menu_note = f'\nوضعیت منوی اول: {"✅ فعال" if enabled else "⛔ غیرفعال"} | جایگاه: {position}'
-    await message.answer(
-        '🛠 ویرایش دکمه انتخاب‌شده\n\n'
-        f'متن فعلی: {html.escape(visible)}{emoji_note}{menu_note}\n'
-        'تغییر متن فقط ظاهر را عوض می‌کند؛ callback/عملکرد اصلی دست‌نخورده می‌ماند.\n\n'
-        'برای دیدن عملکرد واقعی، «▶️ انجام عملکرد دکمه» را بزن.',
-        reply_markup=button_editor_markup(target),
-        parse_mode='HTML',
-    )
+    # Defense in depth: editor chrome is never itself a live-edit target, even if
+    # this project is moved/renamed or output-call detection changes later.
+    with edit_runtime.output_passthrough():
+        await message.answer(
+            '🛠 ویرایش دکمه انتخاب‌شده\n\n'
+            f'متن فعلی: {html.escape(visible)}{emoji_note}{menu_note}\n'
+            'تغییر متن فقط ظاهر را عوض می‌کند؛ callback/عملکرد اصلی دست‌نخورده می‌ماند.\n\n'
+            'برای دیدن عملکرد واقعی، «▶️ انجام عملکرد دکمه» را بزن.',
+            reply_markup=button_editor_markup(target),
+            parse_mode='HTML',
+        )
 
 
 def _customer_reply_target(message: Message) -> edit_runtime.ButtonTarget | None:
@@ -546,13 +549,20 @@ async def edit_button_text_start(callback: CallbackQuery):
     if not target:
         await callback.answer('این دکمه منقضی شده؛ دوباره آن را انتخاب کن.', show_alert=True)
         return
+    existing = edit_runtime.INPUT_WAITERS.get(callback.from_user.id)
+    if existing and existing.get('kind') == 'button_text':
+        current_target = edit_runtime.BUTTON_TARGETS.get(str(existing.get('token') or ''))
+        if current_target and current_target.stable_key == target.stable_key:
+            await callback.answer('ویرایش همین دکمه از قبل فعال است.')
+            return
     edit_runtime.INPUT_WAITERS[callback.from_user.id] = {'kind': 'button_text', 'token': token}
-    await callback.message.answer(
-        'متن کامل جدید دکمه را بفرست.\n\n'
-        f'مقدار فعلی:\n{target.raw_text}\n\n'
-        'ایموجی پریمیوم: هم خود ایموجی را مستقیم می‌توانی بفرستی، هم روش [CUSTOM_EMOJI_ID] متن همچنان فعال است.\n'
-        'برای خروج کامل از حالت ویرایش: /exit'
-    )
+    with edit_runtime.output_passthrough():
+        await callback.message.answer(
+            'متن کامل جدید دکمه را بفرست.\n\n'
+            f'مقدار فعلی:\n{target.raw_text}\n\n'
+            'ایموجی پریمیوم: هم خود ایموجی را مستقیم می‌توانی بفرستی، هم روش [CUSTOM_EMOJI_ID] متن همچنان فعال است.\n'
+            'برای خروج کامل از حالت ویرایش: /exit'
+        )
     await callback.answer()
 
 
@@ -702,6 +712,12 @@ async def edit_text_start(callback: CallbackQuery):
         stickers = get_content_stickers(target.content_key)
     else:
         stickers = edit_runtime.get_generic_stickers(target.stable_key)
+    existing = edit_runtime.INPUT_WAITERS.get(callback.from_user.id)
+    if existing and existing.get('kind') in {'text_value', 'text_stickers'}:
+        current_target = edit_runtime.TEXT_TARGETS.get(str(existing.get('token') or ''))
+        if current_target and current_target.stable_key == target.stable_key:
+            await callback.answer('ویرایش همین متن از قبل فعال است.')
+            return
     edit_runtime.INPUT_WAITERS[callback.from_user.id] = {
         'kind': 'text_value',
         'token': token,
@@ -711,14 +727,17 @@ async def edit_text_start(callback: CallbackQuery):
         'stickers_replaced': False,
     }
     sticker_line = (f'استیکرهای فعلی: {len(stickers)}\n' if target.allow_stickers else 'این بخش کپشن رسانه است؛ برای حفظ ارسال یک‌پیامه، استیکر جدا ندارد.\n')
-    await callback.message.answer(
-        f'✏️ {target.label}\n\n'
-        f'متغیرهای قابل استفاده:\n{variables}\n\n'
-        + sticker_line
-        + 'پیام بعدی فقط متن کامل فعلی است؛ آن را Copy کن، فقط بخش دلخواه را عوض کن و کامل برگردان.\n'
-        + 'اگر متن را نمی‌خواهی عوض کنی /done بزن. برای خروج کامل /exit.'
-    )
-    await callback.message.answer(current or ' ')
+    # These are editor instructions/current-value previews, not business output.
+    # Explicit passthrough prevents recursive edit controls under every install path.
+    with edit_runtime.output_passthrough():
+        await callback.message.answer(
+            f'✏️ {target.label}\n\n'
+            f'متغیرهای قابل استفاده:\n{variables}\n\n'
+            + sticker_line
+            + 'پیام بعدی فقط متن کامل فعلی است؛ آن را Copy کن، فقط بخش دلخواه را عوض کن و کامل برگردان.\n'
+            + 'اگر متن را نمی‌خواهی عوض کنی /done بزن. برای خروج کامل /exit.'
+        )
+        await callback.message.answer(current or ' ')
     await callback.answer()
 
 

@@ -162,6 +162,9 @@ async def global_error_handler(event) -> bool:
                 pass
         return True
 
+    if db.is_ignorable_system_error(exception, type(exception).__name__):
+        return True
+
     logging.error('Unhandled update error', exc_info=(type(exception), exception, exception.__traceback__))
     try:
         db.record_system_error('bot.global_error_handler', str(exception), error_type=type(exception).__name__)

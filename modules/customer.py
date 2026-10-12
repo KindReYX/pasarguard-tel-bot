@@ -41,6 +41,32 @@ customer_router = Router()
 USERNAME_RE = re.compile(r'^[A-Za-z][A-Za-z0-9_]{1,30}[A-Za-z0-9]$')
 
 
+class ServiceBuildError(RuntimeError):
+    def __init__(self, message: str, *, details: dict[str, Any]):
+        super().__init__(message)
+        self.details = details
+
+
+def _service_failure(exc: Exception, *, stage: str, order: dict) -> tuple[str, dict[str, Any]]:
+    raw = str(exc).strip() or repr(exc) or type(exc).__name__
+    diagnostic = db.diagnose_system_error(raw, type(exc).__name__, 'customer.process_one_service_job')
+    details: dict[str, Any] = {
+        'diagnostic_code': diagnostic['code'], 'diagnosis': diagnostic['summary'], 'suggestion': diagnostic['suggestion'],
+        'stage': stage, 'root_error_type': type(exc).__name__, 'root_error': raw[:1200],
+        'order_id': int(order.get('id') or 0), 'package_id': str(order.get('package_id') or ''), 'order_type': str(order.get('order_type') or 'new'),
+    }
+    panel_status = getattr(exc, 'status', None)
+    if panel_status is not None:
+        details['panel_status'] = panel_status
+    message = (
+        'پرداخت ثبت شد اما ساخت/تمدید سرویس کامل نشد.\n'
+        f'{diagnostic["summary"]}\n'
+        f'مرحله: {stage}\n'
+        f'خطای اصلی: {type(exc).__name__}: {raw}'
+    )
+    return message, details
+
+
 class CustomerBuyState(StatesGroup):
     waiting_username = State()
     waiting_coupon = State()
@@ -1024,9 +1050,11 @@ async def refresh_service_from_panel(service: dict) -> tuple[dict, dict]:
 
 
 async def create_or_renew_service_for_order(order: dict) -> tuple[bool, str, dict | None]:
+    stage = 'شروع عملیات ساخت/تمدید'
     try:
         package_id_raw = str(order['package_id'])
         custom_parts = package_id_raw.split(':') if package_id_raw.startswith('custom:') else []
+        stage = 'دریافت قالب بسته از پنل'
         if len(custom_parts) >= 6:
             base_tid, gb, months, users, product_id = custom_parts[1], int(custom_parts[2]), int(custom_parts[3]), int(custom_parts[4]), int(custom_parts[5])
             template = await api_client.get_user_template(base_tid)
@@ -1035,64 +1063,51 @@ async def create_or_renew_service_for_order(order: dict) -> tuple[bool, str, dic
             template = await api_client.get_user_template(order['package_id'])
         user_id = int(order['user_id'])
         if order.get('order_type') == 'renew' and order.get('service_id'):
+            stage = 'خواندن سرویس فعلی از دیتابیس'
             service = db.get_user_service(int(order['service_id']), user_id)
             if not service:
                 raise RuntimeError('سرویس برای تمدید پیدا نشد.')
             username = service.get('panel_username') or service.get('service_username')
+            stage = 'دریافت اطلاعات فعلی سرویس از پنل'
             current_user = await api_client.get_user(username)
             renewal_mode = api_client.normalize_renewal_mode(db.get_setting('renewal_mode', 'add'))
             renew_payload = api_client.build_renew_payload(current_user, template, renewal_mode=renewal_mode)
+            stage = 'ارسال درخواست تمدید به پنل'
             updated_user = await api_client.update_user(username, renew_payload)
             if renewal_mode == 'replace':
-                # Replacement means the old remaining traffic is burned. Reset usage
-                # after applying the new quota so the whole requested package is usable.
+                stage = 'ریست مصرف سرویس در پنل'
                 await api_client.reset_user_traffic(username)
+                stage = 'دریافت نتیجه تمدید از پنل'
                 updated_user = await api_client.get_user(username)
             sub_url = api_client.extract_subscription_url(updated_user) or service.get('subscription_url')
             links = api_client.extract_config_links(updated_user)
             if not links and sub_url:
                 try:
+                    stage = 'دریافت کانفیگ‌ها از Subscription'
                     links = await api_client.fetch_subscription_configs(sub_url)
                 except Exception:
                     links = []
-            db.save_user_service(
-                telegram_id=user_id,
-                order_id=int(order['id']),
-                package_id=str(order['package_id']),
-                package_name=str(order['package_name']),
-                service_username=username,
-                user_data=updated_user,
-                subscription_url=sub_url,
-                links=links,
-            )
+            stage = 'ذخیره نتیجه تمدید در دیتابیس'
+            db.save_user_service(telegram_id=user_id, order_id=int(order['id']), package_id=str(order['package_id']), package_name=str(order['package_name']), service_username=username, user_data=updated_user, subscription_url=sub_url, links=links)
             return True, 'سرویس با موفقیت تمدید شد ✅', updated_user
 
         raw_username = str(order['customer_username'])
-        created_user, actual_username = await api_client.create_user_with_unique_username(
-            template,
-            raw_username,
-            note=build_panel_note_for_order(order),
-        )
+        stage = 'ساخت کاربر جدید در پنل'
+        created_user, actual_username = await api_client.create_user_with_unique_username(template, raw_username, note=build_panel_note_for_order(order))
+        stage = 'دریافت لینک و کانفیگ سرویس از پنل'
         links, user_data, sub_url = await api_client.get_user_config_links(actual_username)
         if not user_data:
             user_data = created_user
         sub_url = sub_url or api_client.extract_subscription_url(created_user)
         if not links:
             links = api_client.extract_config_links(created_user)
-        db.save_user_service(
-            telegram_id=user_id,
-            order_id=int(order['id']),
-            package_id=str(order['package_id']),
-            package_name=str(order['package_name']),
-            service_username=actual_username,
-            user_data=user_data or created_user,
-            subscription_url=sub_url,
-            links=links,
-        )
+        stage = 'ذخیره سرویس ساخته‌شده در دیتابیس'
+        db.save_user_service(telegram_id=user_id, order_id=int(order['id']), package_id=str(order['package_id']), package_name=str(order['package_name']), service_username=actual_username, user_data=user_data or created_user, subscription_url=sub_url, links=links)
         return True, f'سرویس با موفقیت ساخته شد ✅\nنام نهایی سرویس: {actual_username}', user_data or created_user
     except Exception as exc:
-        db.add_notification('service_create_failed', f'سفارش #{order.get("id")} پرداخت شد اما عملیات سرویس خطا داد: {exc}')
-        return False, f'پرداخت ثبت شد اما ساخت/تمدید سرویس نیاز به بررسی ادمین دارد. خطا: {exc}', None
+        message, details = _service_failure(exc, stage=stage, order=order)
+        db.add_notification('service_create_failed', f'سفارش #{order.get("id")} پرداخت شد اما عملیات سرویس خطا داد: {message}')
+        raise ServiceBuildError(message, details=details) from exc
 
 async def process_one_service_job(job: dict) -> tuple[bool, str]:
     job_id = int(job['id'])
@@ -1113,10 +1128,23 @@ async def process_one_service_job(job: dict) -> tuple[bool, str]:
             return True, service_message
         raise RuntimeError(service_message)
     except Exception as exc:
-        db.mark_service_job_failed(job_id, str(exc), retry_delay_seconds=120)
-        db.execute("UPDATE orders SET status='needs_admin_review' WHERE id=?", (order_id,))
-        db.record_system_error('customer.process_one_service_job', str(exc), entity_type='order', entity_id=str(order_id), error_type=type(exc).__name__)
-        return False, str(exc)
+        details = dict(getattr(exc, 'details', {}) or {})
+        diagnosis = db.diagnose_system_error(str(exc), type(exc).__name__, 'customer.process_one_service_job')
+        code = str(details.get('diagnostic_code') or diagnosis.get('code') or 'unknown')
+        transient = code in {'timeout', 'dns_error', 'connection_error', 'rate_limit', 'upstream_unavailable'}
+        db.mark_service_job_failed(job_id, str(exc), retry_delay_seconds=120 if transient else 300)
+        job_state = db.fetchone('SELECT status, attempts, max_attempts FROM service_jobs WHERE id=?', (job_id,)) or {}
+        retrying = str(job_state.get('status') or '') == 'retry'
+        details.update({'attempt': int(job_state.get('attempts') or 0), 'max_attempts': int(job_state.get('max_attempts') or 0), 'retrying': retrying})
+        if retrying and transient:
+            db.execute("UPDATE orders SET status='build_queued' WHERE id=?", (order_id,))
+            result_message = str(exc) + '\n🔁 اختلال موقت تشخیص داده شد؛ سیستم حدود ۲ دقیقه دیگر خودکار دوباره تلاش می‌کند.'
+        else:
+            db.execute("UPDATE orders SET status='needs_admin_review' WHERE id=?", (order_id,))
+            result_message = str(exc)
+        root_type = str(details.get('root_error_type') or type(exc).__name__)
+        db.record_system_error('customer.process_one_service_job', result_message, entity_type='order', entity_id=str(order_id), error_type=root_type, details=details)
+        return False, result_message
     finally:
         payment_engine.finish_order_processing(order_id)
 

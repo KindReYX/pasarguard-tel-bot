@@ -219,7 +219,7 @@ def _receipt_caption(receipt: dict) -> str:
     )
 
 
-def _approved_caption_with_link(receipt: dict, sub_url: str | None) -> str:
+def _approved_caption_with_link(receipt: dict, sub_url: str | None, delivery_error: str | None = None) -> str:
     base = _receipt_caption(receipt)
     # Normalize status text (DB stores 'approved', caption shows pending by default if not refreshed)
     base = base.replace('وضعیت: approved', 'وضعیت: ✅ تایید شده').replace('وضعیت: pending', 'وضعیت: ✅ تایید شده')
@@ -229,11 +229,16 @@ def _approved_caption_with_link(receipt: dict, sub_url: str | None) -> str:
             safe = html.escape(str(sub_url).strip())
             base += f'\n\n🔗 لینک اشتراک:\n<code>{safe}</code>'
         else:
-            base += '\n\n⚠️ لینک اشتراک: در حال ساخت / نیازمند بررسی (سرویس ساخته نشد)'
+            base += '\n\n⚠️ پرداخت تایید شده اما تحویل سرویس کامل نشده است.'
+            if delivery_error:
+                short_error = html.escape(str(delivery_error).strip()[:700])
+                if short_error:
+                    base += f'\n🧩 علت آخر:\n<code>{short_error}</code>'
+            base += '\n\nبرای اجرای دوباره فقط مرحله ساخت/تحویل، از دکمه «تلاش مجدد در تحویل سفارش» استفاده کنید.'
     return base
 
 
-def _approved_keyboard(receipt: dict, sub_url: str | None = None) -> InlineKeyboardMarkup:
+def _approved_keyboard(receipt: dict, sub_url: str | None = None, *, allow_retry: bool = False) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     try:
         uid = int(receipt['user_id'])
@@ -246,6 +251,12 @@ def _approved_keyboard(receipt: dict, sub_url: str | None = None) -> InlineKeybo
         pass
     if receipt.get('kind') == 'order' and sub_url and str(sub_url).strip().startswith(('http://', 'https://')):
         rows.append([InlineKeyboardButton(text='🔗 باز کردن لینک اشتراک', url=str(sub_url).strip())])
+    if receipt.get('kind') == 'order' and allow_retry:
+        rows.append([InlineKeyboardButton(
+            text='🔁 تلاش مجدد در تحویل سفارش',
+            callback_data=f'cardadmin:retry_delivery:{receipt["id"]}',
+            style=get_button_style('primary'),
+        )])
     rows.append([InlineKeyboardButton(text='🔄 وضعیت', callback_data=f'cardadmin:view:{receipt["id"]}')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -650,63 +661,181 @@ async def receive_receipt(message: Message, state: FSMContext):
         )
 
 
+async def _send_order_success_to_customer(bot: Bot, order: dict, service_message: str) -> str | None:
+    """Send the same successful delivery payload used after initial receipt approval.
+
+    This function has NO financial side effects. It only reads the already-created
+    service and sends the subscription + after-purchase message to the customer.
+    """
+    from modules import customer
+
+    order_id = int(order['id'])
+    service = db.fetchone(
+        'SELECT * FROM user_services WHERE order_id=? AND telegram_id=? AND is_active=1 ORDER BY id DESC LIMIT 1',
+        (order_id, int(order['user_id'])),
+    )
+    if not service:
+        raise RuntimeError('سرویس ساخته شده در دیتابیس پیدا نشد؛ امکان تحویل به کاربر وجود ندارد.')
+
+    sub = service.get('subscription_url')
+    sub_url = str(sub).strip() if sub else None
+    receipt_text = payment_engine.build_receipt(order, '\n' + service_message)
+
+    class _DeliverySender:
+        def __init__(self, target_bot: Bot, chat_id: int):
+            self.bot = target_bot
+            self.chat_id = int(chat_id)
+
+        async def answer(self, text: str, **kwargs):
+            return await self.bot.send_message(self.chat_id, text, **kwargs)
+
+        async def answer_photo(self, photo, **kwargs):
+            return await self.bot.send_photo(self.chat_id, photo, **kwargs)
+
+    sender = _DeliverySender(bot, int(order['user_id']))
+    await customer.send_subscription_delivery(
+        sender,
+        service,
+        sub_url=sub_url,
+        title='✅ سرویس آماده شد',
+        invoice_text=receipt_text,
+    )
+
+    after_purchase = str(db.get_setting('after_purchase_text', '') or '')
+    if after_purchase:
+        user_row = db.fetchone('SELECT * FROM bot_users WHERE telegram_id=?', (int(order['user_id']),)) or {}
+
+        class U:
+            pass
+
+        u = U()
+        u.id = order['user_id']
+        u.first_name = user_row.get('first_name') or ''
+        u.username = user_row.get('username') or ''
+        ctx = user_template_context(u, support=str(db.get_setting('support_username', '') or ''))
+        ctx.update(db.product_context_for_template(order.get('package_id')))
+        ctx.update({
+            'order_id': order_id,
+            'package_name': order.get('package_name', ''),
+            'service_name': order.get('customer_username', ''),
+            'price': order.get('amount_toman') or 0,
+        })
+        rendered = await render_template_html(bot, after_purchase, ctx)
+        await bot.send_message(int(order['user_id']), rendered, parse_mode='HTML', reply_markup=customer_keyboard())
+
+    return sub_url
+
+
 async def _complete_order(bot: Bot, receipt: dict) -> tuple[bool, str, str | None]:
     from modules import customer
+
     order_id = int(receipt['entity_id'])
     order = db.get_order(order_id)
     if not order:
         return False, 'سفارش پیدا نشد.', None
-    if order.get('status') in {'service_ready', 'build_queued', 'building_service'}:
-        # Already built — fetch existing link for admin edit
-        existing_service = db.fetchone('SELECT subscription_url FROM user_services WHERE order_id=? AND telegram_id=? AND is_active=1 ORDER BY id DESC LIMIT 1', (order_id, int(order['user_id'] if order.get('user_id') else receipt['user_id'])))
+
+    # If the service is already ready, never re-run financial effects or build it again.
+    if order.get('status') == 'service_ready':
+        existing_service = db.fetchone(
+            'SELECT subscription_url FROM user_services WHERE order_id=? AND telegram_id=? AND is_active=1 ORDER BY id DESC LIMIT 1',
+            (order_id, int(order['user_id'] if order.get('user_id') else receipt['user_id'])),
+        )
         existing_sub = (existing_service or {}).get('subscription_url') if existing_service else None
-        return True, 'سفارش قبلا پردازش شده است.', existing_sub
+        return True, 'سفارش قبلا با موفقیت تحویل شده است.', existing_sub
+
     payable = int(order.get('payable_toman') or receipt['amount_toman'] or 0)
     db.mark_order_provider_paid(order_id, 'card_transfer', payable, str(receipt['id']), {'receipt_id': receipt['id']})
     current = db.get_order(order_id) or order
+
+    # Idempotent: wallet/coupon/referral/payment effects are applied only once.
     db.finalize_order_payment_effects(order_id)
     db.enqueue_service_job(order_id)
     db.execute("UPDATE orders SET status='build_queued' WHERE id=?", (order_id,))
+
     job = db.fetchone('SELECT * FROM service_jobs WHERE order_id=?', (order_id,))
-    ok, service_message = await customer.process_one_service_job(job) if job else (False, 'صف ساخت پیدا نشد.')
+    if job:
+        ok, service_message = await customer.process_one_service_job(job)
+    else:
+        service_message = 'صف ساخت سرویس برای سفارش ایجاد نشد.'
+        db.record_system_error(
+            'card_transfer.complete_order',
+            service_message,
+            entity_type='order',
+            entity_id=str(order_id),
+            error_type='ServiceJobMissing',
+        )
+        ok = False
+
     final = db.get_order(order_id) or current
-    receipt_text = payment_engine.build_receipt(final, '\n' + service_message)
     sub_url: str | None = None
-    # Receipt is attached to the QR photo caption by send_subscription_delivery.
-    # Do not send a separate receipt message here.
     if ok:
-        service = db.fetchone('SELECT * FROM user_services WHERE order_id=? AND telegram_id=? AND is_active=1 ORDER BY id DESC LIMIT 1', (order_id, int(final['user_id'])))
-        if service:
-            sub = service.get('subscription_url')
-            sub_url = str(sub).strip() if sub else None
-            if sub_url:
-                class _DeliverySender:
-                    def __init__(self, target_bot: Bot, chat_id: int):
-                        self.bot = target_bot
-                        self.chat_id = int(chat_id)
-
-                    async def answer(self, text: str, **kwargs):
-                        return await self.bot.send_message(self.chat_id, text, **kwargs)
-
-                    async def answer_photo(self, photo, **kwargs):
-                        return await self.bot.send_photo(self.chat_id, photo, **kwargs)
-
-                sender = _DeliverySender(bot, int(final['user_id']))
-                await customer.send_subscription_delivery(sender, service, sub_url=sub_url, title='✅ سرویس آماده شد', invoice_text=receipt_text)
-            else:
-                # No sub_url in DB — try to keep receipt for admin even if empty
-                sub_url = None
-        after_purchase = str(db.get_setting('after_purchase_text', '') or '')
-        if after_purchase:
-            user_row = db.fetchone('SELECT * FROM bot_users WHERE telegram_id=?', (int(final['user_id']),)) or {}
-            class U: pass
-            u=U(); u.id=final['user_id']; u.first_name=user_row.get('first_name') or ''; u.username=user_row.get('username') or ''
-            ctx = user_template_context(u, support=str(db.get_setting('support_username', '') or ''))
-            ctx.update(db.product_context_for_template(final.get('package_id')))
-            ctx.update({'order_id': order_id, 'package_name': final.get('package_name',''), 'service_name': final.get('customer_username',''), 'price': final.get('amount_toman') or 0})
-            rendered = await render_template_html(bot, after_purchase, ctx)
-            await bot.send_message(int(final['user_id']), rendered, parse_mode='HTML', reply_markup=customer_keyboard())
+        sub_url = await _send_order_success_to_customer(bot, final, service_message)
     return ok, service_message, sub_url
+
+
+async def _retry_order_delivery(bot: Bot, receipt: dict) -> tuple[bool, str, str | None, bool]:
+    """Retry ONLY service build/delivery for an already-paid card-transfer order.
+
+    Returns (ok, message, sub_url, already_ready). The function intentionally does
+    not call mark_order_provider_paid/finalize_order_payment_effects, so pressing
+    the retry button can never debit the customer's wallet or consume a coupon twice.
+    """
+    from modules import customer
+
+    if str(receipt.get('kind') or '') != 'order':
+        return False, 'تلاش مجدد تحویل فقط برای سفارش سرویس قابل استفاده است.', None, False
+
+    order_id = int(receipt['entity_id'])
+    order = db.get_order(order_id)
+    if not order:
+        return False, 'سفارش پیدا نشد.', None, False
+
+    # Safety gate: retry must never turn an unpaid order into a paid one.
+    paid_evidence = bool(
+        order.get('paid_at')
+        or str(order.get('provider_status') or '').lower() == 'paid'
+        or int(order.get('payment_effects_applied') or 0) == 1
+        or str(order.get('status') or '') in {'paid', 'build_queued', 'building_service', 'needs_admin_review', 'service_ready'}
+    )
+    if not paid_evidence:
+        return False, 'این سفارش پرداخت‌شده تشخیص داده نشد؛ Retry برای امنیت اجرا نشد.', None, False
+
+    existing_service = db.fetchone(
+        'SELECT * FROM user_services WHERE order_id=? AND telegram_id=? AND is_active=1 ORDER BY id DESC LIMIT 1',
+        (order_id, int(order['user_id'])),
+    )
+    if str(order.get('status') or '') == 'service_ready' and existing_service:
+        sub = existing_service.get('subscription_url')
+        return True, 'این سفارش قبلا با موفقیت تحویل شده است.', (str(sub).strip() if sub else None), True
+
+    # If a previous attempt actually saved the service but failed afterwards,
+    # recover it instead of creating/renewing a second time.
+    if existing_service:
+        db.execute("UPDATE orders SET status='service_ready' WHERE id=?", (order_id,))
+        job = db.fetchone('SELECT id FROM service_jobs WHERE order_id=?', (order_id,))
+        if job:
+            db.mark_service_job_done(int(job['id']))
+        recovered = db.get_order(order_id) or order
+        sub_url = await _send_order_success_to_customer(bot, recovered, 'سرویس ساخته شده بود و تحویل آن دوباره انجام شد ✅')
+        return True, 'سرویس موجود بازیابی و با موفقیت تحویل شد ✅', sub_url, False
+
+    # Manual retry gets a fresh attempt budget, but only for the build job.
+    job_id = db.prepare_service_job_manual_retry(order_id)
+    if not job_id:
+        return False, 'صف ساخت سرویس برای Retry ایجاد نشد.', None, False
+
+    db.execute("UPDATE orders SET status='build_queued' WHERE id=?", (order_id,))
+    job = db.fetchone('SELECT * FROM service_jobs WHERE id=?', (job_id,))
+    if not job:
+        return False, 'صف ساخت سرویس برای Retry پیدا نشد.', None, False
+
+    ok, service_message = await customer.process_one_service_job(job)
+    final = db.get_order(order_id) or order
+    if not ok:
+        return False, service_message, None, False
+
+    sub_url = await _send_order_success_to_customer(bot, final, service_message)
+    return True, service_message, sub_url, False
 
 
 @card_transfer_router.callback_query(F.data.startswith('cardadmin:approve:'))
@@ -730,6 +859,8 @@ async def approve_receipt(callback: CallbackQuery, state: FSMContext):
         conn.commit()
     receipt = db.fetchone('SELECT * FROM card_receipts WHERE id=?', (receipt_id,))
     sub_url: str | None = None
+    delivery_ok = True
+    delivery_result = ''
     try:
         if receipt['kind'] == 'wallet':
             req = db.get_wallet_charge_request(int(receipt['entity_id']))
@@ -741,23 +872,27 @@ async def approve_receipt(callback: CallbackQuery, state: FSMContext):
             await callback.bot.send_message(int(receipt['user_id']), wallet_charge_result_text(int(receipt['entity_id']), balance, '✅ فیش شما تایید شد و کیف پول شارژ شد.'), reply_markup=customer_keyboard())
         else:
             ok, result, sub = await _complete_order(callback.bot, receipt)
+            delivery_ok = bool(ok)
+            delivery_result = str(result or '')
             sub_url = sub
-            if not ok:
-                db.record_system_error('card_transfer.approve_order', result, entity_type='order', entity_id=str(receipt['entity_id']), error_type='ServiceBuildError')
+            # Detailed service-build failure is already recorded by process_one_service_job.
             # Fallback: if _complete_order didn't return link (e.g., already built), fetch from DB
             if not sub_url:
                 svc = db.fetchone('SELECT subscription_url FROM user_services WHERE order_id=? AND telegram_id=? AND is_active=1 ORDER BY id DESC LIMIT 1', (int(receipt['entity_id']), int(receipt['user_id'])))
                 if svc and svc.get('subscription_url'):
                     sub_url = str(svc.get('subscription_url')).strip()
         db.add_log(callback.from_user.id, 'card_receipt_approved', 'card_receipt', str(receipt_id))
-        await callback.answer('فیش تایید شد ✅', show_alert=True)
+        if receipt['kind'] == 'order' and not delivery_ok:
+            await callback.answer('پرداخت تایید شد، اما تحویل سرویس کامل نشد. دکمه تلاش مجدد اضافه شد.', show_alert=True)
+        else:
+            await callback.answer('فیش تایید شد ✅', show_alert=True)
         # Update admin's receipt message: show clickable user + link, and replace approve keyboard with link keyboard
         try:
             # Re-fetch to get approved status
             updated = db.fetchone('SELECT * FROM card_receipts WHERE id=?', (receipt_id,)) or receipt
             updated['status'] = 'approved'
-            caption = _approved_caption_with_link(updated, sub_url)
-            markup = _approved_keyboard(updated, sub_url)
+            caption = _approved_caption_with_link(updated, sub_url, delivery_result if not delivery_ok else None)
+            markup = _approved_keyboard(updated, sub_url, allow_retry=(updated.get('kind') == 'order' and not delivery_ok))
             # Try edit caption (photo) first, fallback to edit text if it was document caption as text
             try:
                 await callback.message.edit_caption(caption=caption, reply_markup=markup, parse_mode='HTML')
@@ -799,6 +934,123 @@ async def approve_receipt(callback: CallbackQuery, state: FSMContext):
         db.execute("UPDATE card_receipts SET status='needs_review' WHERE id=? AND status='approved'", (receipt_id,))
         db.record_system_error('card_transfer.approve', str(exc), entity_type='card_receipt', entity_id=str(receipt_id), error_type=type(exc).__name__)
         await callback.answer('تایید انجام نشد. خطا برای سوپرادمین ثبت شد.', show_alert=True)
+
+
+@card_transfer_router.callback_query(F.data.startswith('cardadmin:retry_delivery:'))
+async def retry_receipt_delivery(callback: CallbackQuery):
+    if not _can_review(callback.from_user.id):
+        await callback.answer('دسترسی بررسی فیش ندارید.', show_alert=True)
+        return
+
+    try:
+        receipt_id = int(callback.data.rsplit(':', 1)[1])
+    except Exception:
+        await callback.answer('شناسه فیش نامعتبر است.', show_alert=True)
+        return
+
+    receipt = db.fetchone('SELECT * FROM card_receipts WHERE id=?', (receipt_id,))
+    if not receipt:
+        await callback.answer('فیش پیدا نشد.', show_alert=True)
+        return
+    if str(receipt.get('kind') or '') != 'order':
+        await callback.answer('این عملیات فقط برای سفارش سرویس است.', show_alert=True)
+        return
+    if str(receipt.get('status') or '') not in {'approved', 'needs_review'}:
+        await callback.answer('این فیش هنوز تایید نشده است.', show_alert=True)
+        return
+
+    order_id = int(receipt['entity_id'])
+    order = db.get_order(order_id)
+    if not order:
+        await callback.answer('سفارش پیدا نشد.', show_alert=True)
+        return
+
+    # A stale Telegram button must not resend a successfully delivered order.
+    existing = db.fetchone(
+        'SELECT subscription_url FROM user_services WHERE order_id=? AND telegram_id=? AND is_active=1 ORDER BY id DESC LIMIT 1',
+        (order_id, int(order['user_id'])),
+    )
+    if str(order.get('status') or '') == 'service_ready' and existing:
+        sub = existing.get('subscription_url')
+        sub_url = str(sub).strip() if sub else None
+        updated = db.fetchone('SELECT * FROM card_receipts WHERE id=?', (receipt_id,)) or receipt
+        updated['status'] = 'approved'
+        caption = _approved_caption_with_link(updated, sub_url)
+        markup = _approved_keyboard(updated, sub_url, allow_retry=False)
+        try:
+            await callback.message.edit_caption(caption=caption, reply_markup=markup, parse_mode='HTML')
+        except Exception:
+            try:
+                await callback.message.edit_reply_markup(reply_markup=markup)
+            except Exception:
+                pass
+        await callback.answer('این سفارش قبلا با موفقیت تحویل شده است؛ برداشت یا تحویل دوباره انجام نشد.', show_alert=True)
+        return
+
+    await callback.answer('در حال تلاش مجدد برای ساخت/تحویل سرویس…', show_alert=False)
+
+    try:
+        ok, result, sub_url, already_ready = await _retry_order_delivery(callback.bot, receipt)
+        updated = db.fetchone('SELECT * FROM card_receipts WHERE id=?', (receipt_id,)) or receipt
+        updated['status'] = 'approved'
+
+        if ok:
+            # Payment was already accepted; keep the receipt approved and resolve related order errors.
+            db.execute("UPDATE card_receipts SET status='approved' WHERE id=?", (receipt_id,))
+            db.execute(
+                "UPDATE system_errors SET is_resolved=1 WHERE entity_type='order' AND entity_id=? AND is_resolved=0",
+                (str(order_id),),
+            )
+            db.add_log(callback.from_user.id, 'card_receipt_delivery_retried', 'order', str(order_id))
+            caption = _approved_caption_with_link(updated, sub_url)
+            markup = _approved_keyboard(updated, sub_url, allow_retry=False)
+            try:
+                await callback.message.edit_caption(caption=caption, reply_markup=markup, parse_mode='HTML')
+            except Exception as cap_exc:
+                low = str(cap_exc).lower()
+                if 'button_user_privacy_restricted' in low and _has_user_link_button(markup):
+                    markup = _strip_user_link_buttons(markup)
+                try:
+                    await callback.message.edit_reply_markup(reply_markup=markup)
+                except Exception:
+                    pass
+                try:
+                    await callback.message.edit_caption(caption=caption, parse_mode='HTML')
+                except Exception:
+                    pass
+            if already_ready:
+                await callback.message.answer('ℹ️ سفارش قبلا تحویل شده بود؛ هیچ عملیات مالی یا ارسال تکراری انجام نشد.')
+            else:
+                await callback.message.answer('✅ تحویل سفارش با موفقیت انجام شد. هیچ مبلغی دوباره کسر نشد.')
+            return
+
+        caption = _approved_caption_with_link(updated, None, result)
+        markup = _approved_keyboard(updated, None, allow_retry=True)
+        try:
+            await callback.message.edit_caption(caption=caption, reply_markup=markup, parse_mode='HTML')
+        except Exception:
+            try:
+                await callback.message.edit_reply_markup(reply_markup=markup)
+            except Exception:
+                pass
+        await callback.message.answer('⚠️ تحویل هنوز ناموفق است؛ پرداخت دست‌نخورده باقی ماند و دکمه Retry فعال است.')
+    except Exception as exc:
+        db.record_system_error(
+            'card_transfer.retry_delivery',
+            str(exc),
+            user_id=callback.from_user.id,
+            entity_type='order',
+            entity_id=str(order_id),
+            error_type=type(exc).__name__,
+        )
+        updated = db.fetchone('SELECT * FROM card_receipts WHERE id=?', (receipt_id,)) or receipt
+        updated['status'] = 'approved'
+        markup = _approved_keyboard(updated, None, allow_retry=True)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=markup)
+        except Exception:
+            pass
+        await callback.message.answer('⚠️ Retry با خطا مواجه شد؛ هیچ مبلغی دوباره کسر نشد.')
 
 
 @card_transfer_router.callback_query(F.data.startswith('cardadmin:reject:'))

@@ -282,7 +282,10 @@ async def get_user_templates() -> list[dict]:
         _l1_set('panel:user_templates:simple', templates, 20)
     except Exception:
         pass
-    return templates
+    # The first network response from /simple can omit data_limit. Public-price
+    # packages must be hydrated before the very first customer render as well,
+    # otherwise they only appear on the second visit after the cache is warm.
+    return await _hydrate_public_priced_templates(templates)
 
 
 async def get_user_template(template_id: str | int, *, force: bool = False) -> dict:

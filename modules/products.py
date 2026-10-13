@@ -8,7 +8,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 import api_client
 import db
 from keyboards import BTN_PRODUCTS, EditableButtonFilter, back_keyboard
-from modules.packs import format_price, get_pack_meta, pack_title, upsert_pack_meta, effective_pack_price
+from modules.packs import format_price, get_pack_meta, pack_title, pack_display_name, upsert_pack_meta, effective_pack_price
 from permissions import can_manage_packs, can_view_packs, deny_callback, deny_message
 from utils import edit_or_answer, answer_callback
 
@@ -68,7 +68,7 @@ async def product_pack_keyboard(product_id: int) -> InlineKeyboardMarkup:
         tid = str(meta['template_id'])
         pack = panel.get(tid, {'id': tid, 'name': f'بسته {tid}'})
         eye = '👁' if int(meta.get('is_visible', 1)) else '🙈'
-        rows.append([InlineKeyboardButton(text=f"{eye} {pack_title(pack)} | {format_price(effective_pack_price(meta, pack))}", callback_data=f'pack:view:{tid}')])
+        rows.append([InlineKeyboardButton(text=f"{eye} {pack_display_name(pack, meta)} | {format_price(effective_pack_price(meta, pack))}", callback_data=f'pack:view:{tid}')])
     cfg = product_row(product_id) or {}
     if int(cfg.get('custom_enabled') or 0):
         rows.append([InlineKeyboardButton(text='🎛 بسته دلخواه | فعال', callback_data=f'custom_admin:view:{product_id}')])
@@ -192,7 +192,7 @@ async def product_attach(callback: CallbackQuery):
         tid = str(pack.get('id')); meta = get_pack_meta(tid)
         owner = meta.get('product_id')
         mark = '✅' if owner and int(owner) == pid else ('↪️' if owner else '➕')
-        rows.append([InlineKeyboardButton(text=f'{mark} {pack_title(pack)}', callback_data=f'product:attach_do:{pid}:{tid}')])
+        rows.append([InlineKeyboardButton(text=f'{mark} {pack_display_name(pack, meta)}', callback_data=f'product:attach_do:{pid}:{tid}')])
     rows.append([InlineKeyboardButton(text='🔙 بازگشت', callback_data=f'product:packs:{pid}')])
     await edit_or_answer(callback, 'یک بسته را انتخاب کنید. بسته‌ای که قبلاً در محصول دیگری باشد، به این محصول منتقل می‌شود:', reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 

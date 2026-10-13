@@ -8,7 +8,7 @@ import api_client, db
 from permissions import can_manage_packs, deny_callback
 from utils import edit_or_answer
 from modules.packs import pack_title
-from modules.customer import CustomerBuyState, username_rules_text, get_pack_meta, visible_pack_rows_for_product, customer_packs_keyboard
+from modules.customer import CustomerBuyState, username_rules_text, get_pack_meta, visible_pack_rows_for_product, customer_packs_keyboard, edit_product_category_message
 
 custom_packages_router = Router()
 
@@ -307,7 +307,7 @@ async def cust_custom_back(c:CallbackQuery,state:FSMContext):
     pid=int(c.data.split(':')[-1]); await state.clear()
     try:
         p=row(pid); packs=await api_client.get_user_templates(); items=visible_pack_rows_for_product(packs,pid)
-        await edit_or_answer(c,f"🛍 {p.get('name','محصول')}\n\nبسته موردنظر را انتخاب کنید:",reply_markup=customer_packs_keyboard(items,pid))
+        await edit_product_category_message(c, p, customer_packs_keyboard(items, pid))
     except Exception:
         await edit_or_answer(c,'خرید بسته لغو شد. دوباره از منوی خرید انتخاب کنید.')
     await c.answer()

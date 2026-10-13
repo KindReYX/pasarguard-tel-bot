@@ -34,7 +34,7 @@ import modules.payment_engine as payment_engine
 from modules import edit_runtime
 from modules.qr_tools import send_qr_photo, make_qr_file
 from modules import tetrapay, plisio_pay
-from modules.packs import public_price_for_pack, render_package_button_text
+from modules.packs import public_price_for_pack, render_package_button_text, pack_display_name, package_display_name_for_template
 
 customer_router = Router()
 
@@ -167,7 +167,7 @@ async def send_subscription_delivery(message: Message, service: dict, sub_url: s
     context.update({
         'sub_link': str(sub),
         'service_name': str(username),
-        'package_name': str(service.get('package_name') or 'نامشخص'),
+        'package_name': package_display_name_for_template(service.get('package_id'), service.get('package_name') or 'نامشخص'),
         'order_id': str(service.get('order_id') or '-'),
         'price': str(service.get('amount_toman') or service.get('amount') or ''),
         'title': str(title or '✅ سرویس آماده شد'),
@@ -513,6 +513,34 @@ def customer_products_keyboard(rows: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def product_category_text_parts(product: dict) -> tuple[str, str, dict[str, str]]:
+    """Independent editable text for a single product/category purchase page."""
+    product_id = int(product.get('id') or 0)
+    product_name = str(product.get('name') or 'محصول')
+    setting_key = f'product_category_text:{product_id}'
+    default_template = '🛍 {product_name}\n\nبسته موردنظر را انتخاب کنید:'
+    context = {'product_id': str(product_id), 'product_name': product_name}
+    return setting_key, default_template, context
+
+
+async def show_product_category_message(message: Message, product: dict, reply_markup: InlineKeyboardMarkup) -> None:
+    setting_key, template, context = product_category_text_parts(product)
+    with edit_runtime.text_hint(
+        setting_key=setting_key, template=template, variables=context,
+        content_key=setting_key, label=f"توضیحات دسته {context['product_name']}", allow_stickers=True,
+    ):
+        await message.answer(template, reply_markup=reply_markup)
+
+
+async def edit_product_category_message(callback: CallbackQuery, product: dict, reply_markup: InlineKeyboardMarkup) -> None:
+    setting_key, template, context = product_category_text_parts(product)
+    with edit_runtime.text_hint(
+        setting_key=setting_key, template=template, variables=context,
+        content_key=setting_key, label=f"توضیحات دسته {context['product_name']}", allow_stickers=True,
+    ):
+        await edit_or_answer(callback, template, reply_markup=reply_markup)
+
+
 def customer_renew_packs_keyboard(items: list[tuple[dict, dict]], service_id: int) -> InlineKeyboardMarkup:
     rows = []
     for pack, meta in items:
@@ -576,7 +604,7 @@ def services_list_keyboard(services: list[dict]) -> InlineKeyboardMarkup:
     for service in services:
         rows.append([
             InlineKeyboardButton(
-                text=f"📡 {service.get('service_username')} | {service.get('package_name') or 'سرویس'}",
+                text=f"📡 {service.get('service_username')} | {package_display_name_for_template(service.get('package_id'), service.get('package_name') or 'سرویس')}",
                 callback_data=f"cust_service:{service['id']}",
             )
         ])
@@ -738,7 +766,7 @@ def package_username_prompt_context(pack: dict, meta: dict) -> dict[str, Any]:
     price_raw = int(meta.get('price_amount') or 0)
     data_limit_raw = int(pack.get('data_limit') or 0)
     duration_seconds = int(pack.get('expire_duration') or 0)
-    package_name = pack_title(pack)
+    package_name = pack_display_name(pack, meta)
     package_id = str(pack.get('id') or meta.get('template_id') or '')
     username_prefix = str(pack.get('username_prefix') or '')
     username_suffix = str(pack.get('username_suffix') or '')
@@ -906,7 +934,7 @@ def _service_detail_context(service: dict, user_data: dict | None = None, sub_ur
         'sub_link': str(sub_url or service.get('subscription_url') or api_client.extract_subscription_url(user_data) or '-'),
         'status': service_status_label(user_data.get('status') or service.get('status')),
         'service_name': str(service.get('service_username') or '-'),
-        'package_name': str(service.get('package_name') or 'نامشخص'),
+        'package_name': package_display_name_for_template(service.get('package_id'), service.get('package_name') or 'نامشخص'),
         'order_id': str(service.get('order_id') or '-'),
         'purchase_date': str(service.get('created_at') or 'نامشخص'),
         'data_limit': format_bytes(data_limit),
@@ -1235,7 +1263,7 @@ async def buy_subscription(message: Message, state: FSMContext):
         if not items and not custom_enabled:
             await message.answer('فعلا بسته فعالی برای خرید وجود ندارد.', reply_markup=customer_keyboard())
             return
-        await message.answer(f"🛒 خرید اشتراک\n\n{rows[0]['name']}\nبسته موردنظر را انتخاب کنید:", reply_markup=customer_packs_keyboard(items, product_id))
+        await show_product_category_message(message, rows[0], customer_packs_keyboard(items, product_id))
         return
     await message.answer('🛒 خرید اشتراک\n\nمحصول موردنظر را انتخاب کنید:', reply_markup=customer_products_keyboard(rows))
 
@@ -1246,7 +1274,7 @@ async def customer_products(callback: CallbackQuery):
     if len(rows) == 1:
         packs = await api_client.get_user_templates()
         items = visible_pack_rows_for_product(packs, int(rows[0]['id']))
-        await edit_or_answer(callback, f"🛒 {rows[0]['name']}\n\nبسته موردنظر را انتخاب کنید:", reply_markup=customer_packs_keyboard(items, int(rows[0]['id'])))
+        await edit_product_category_message(callback, rows[0], customer_packs_keyboard(items, int(rows[0]['id'])))
     else:
         await edit_or_answer(callback, '🛒 خرید اشتراک\n\nمحصول موردنظر را انتخاب کنید:', reply_markup=customer_products_keyboard(rows))
     await callback.answer()
@@ -1262,7 +1290,7 @@ async def customer_choose_product(callback: CallbackQuery):
     items = visible_pack_rows_for_product(packs, product_id)
     if not items and not int(product.get('custom_enabled') or 0):
         await callback.answer('این محصول فعلا بسته قابل خرید ندارد.', show_alert=True); return
-    await edit_or_answer(callback, f"🛍 {product['name']}\n\nبسته موردنظر را انتخاب کنید:", reply_markup=customer_packs_keyboard(items, product_id))
+    await edit_product_category_message(callback, product, customer_packs_keyboard(items, product_id))
     await callback.answer()
 
 
@@ -1285,7 +1313,7 @@ async def choose_pack(callback: CallbackQuery, state: FSMContext):
         product_id=str(product.get('id') or ''),
         product_name=str(product.get('name') or 'نامشخص'),
         package_id=str(template_id),
-        package_name=pack_title(pack),
+        package_name=pack_display_name(pack, meta),
         price_toman=price,
         discount_amount=0,
         coupon_id=None,
@@ -1955,7 +1983,7 @@ async def service_renew(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.update_data(
         package_id=str(service.get('package_id')),
-        package_name=str(service.get('package_name')),
+        package_name=package_display_name_for_template(service.get('package_id'), service.get('package_name')),
         price_toman=price,
         discount_amount=0,
         coupon_id=None,
@@ -1987,7 +2015,7 @@ async def choose_renew_pack(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await state.update_data(
         package_id=str(template_id),
-        package_name=pack_title(pack),
+        package_name=pack_display_name(pack, meta),
         price_toman=price,
         discount_amount=0,
         coupon_id=None,

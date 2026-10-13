@@ -14,6 +14,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, C
 import api_client
 import db
 from utils import edit_or_answer, person_display, get_button_style, infer_button_kind, message_text_with_custom_emoji_tokens, friendly_error
+from modules.packs import package_display_name_for_template
 from keyboards import EditableButtonFilter
 from keyboards import back_keyboard, BTN_USERS, BTN_CANCEL
 from permissions import is_staff, is_admin, deny_message, deny_callback, can_message_customer, get_role
@@ -190,7 +191,7 @@ def build_admin_service_detail_text(service: dict, user_data: dict | None = None
         f'🆔 آی‌دی سرویس: {code(service.get("id"))}\n'
         f'👤 نام سرویس: {code(service.get("service_username"))}\n'
         f'🔑 پنل یوزرنیم: {code(service.get("panel_username") or service.get("service_username"))}\n'
-        f'📦 بسته: {code(service.get("package_name") or service.get("package_id") or "-")}\n'
+        f'📦 بسته: {code(package_display_name_for_template(service.get("package_id"), service.get("package_name") or service.get("package_id") or "-"))}\n'
         f'📊 وضعیت: {code(_service_status_emoji(service, user_data))}\n'
         f'🗃 is_active (DB): {code(service.get("is_active"))}\n'
         f'🔗 لینک ساب: {code(sub_url)}\n\n'
@@ -270,7 +271,7 @@ def build_user_services_list_text(user_id: int, rows: list[dict], offset: int, t
         status_emoji = _service_status_emoji(r)
         active_flag = '🟢' if int(r.get('is_active') or 0) else '🔴'
         header += (
-            f'{active_flag} {plain(r.get("service_username"))} | {plain(r.get("package_name") or "-")}\n'
+            f'{active_flag} {plain(r.get("service_username"))} | {plain(package_display_name_for_template(r.get("package_id"), r.get("package_name") or "-"))}\n'
             f'   وضعیت: {plain(status_emoji)} | انقضا: {plain(_format_remaining(r.get("expire")))}\n'
             f'   حجم: {_format_bytes(r.get("data_limit"))} / مصرف: {_format_bytes(r.get("used_traffic"))}\n'
             f'   آی‌دی: {code(r.get("id"))}\n\n'
@@ -284,7 +285,7 @@ def build_user_services_keyboard(user_id: int, rows: list[dict], offset: int, to
         sid = int(r.get('id'))
         is_active = int(r.get('is_active') or 0)
         icon = '🟢' if is_active else '🔴'
-        label = f'{icon} {r.get("service_username")} | {r.get("package_name") or "-"}'
+        label = f'{icon} {r.get("service_username")} | {package_display_name_for_template(r.get("package_id"), r.get("package_name") or "-")}'
         # truncate for button
         if len(label) > 48:
             label = label[:47] + '…'

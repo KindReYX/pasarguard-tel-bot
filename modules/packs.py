@@ -151,7 +151,7 @@ def package_button_context(pack: dict, meta: dict) -> dict[str, str]:
     if product_id:
         row = db.fetchone('SELECT name FROM products WHERE id=?', (int(product_id),)) or {}
         product_name = str(row.get('name') or '')
-    name = str(meta.get('display_name') or '').strip() or pack_title(pack)
+    name = pack_display_name(pack, meta)
     tid = str(pack.get('id') or meta.get('template_id') or '')
     return {
         'package_name': name, 'name': name, 'package_id': tid, 'template_id': tid,
@@ -199,6 +199,30 @@ def format_price(amount: int | None, currency: str = 'TOMAN') -> str:
 
 def pack_title(pack: dict) -> str:
     return pack.get('name') or f"بسته {pack.get('id')}"
+
+
+def pack_display_name(pack: dict, meta: dict | None = None) -> str:
+    """Return the bot-side package name, preserving Premium Emoji tokens.
+
+    The panel package name remains untouched.  When an admin has set a local
+    display_name it may contain [CUSTOM_EMOJI_ID] tokens; every outgoing text
+    path can then render those tokens as Telegram Premium Emoji.
+    """
+    if meta is None:
+        template_id = str(pack.get('id') or '')
+        meta = get_pack_meta(template_id) if template_id else {}
+    return str((meta or {}).get('display_name') or '').strip() or pack_title(pack)
+
+
+def package_display_name_for_template(template_id: str | int | None, fallback: str | None = None) -> str:
+    """Resolve the saved bot display name even for already-created orders/services."""
+    tid = str(template_id or '').strip()
+    if tid:
+        meta = get_pack_meta(tid)
+        display = str(meta.get('display_name') or '').strip()
+        if display:
+            return display
+    return str(fallback or '').strip() or (f'بسته {tid}' if tid else 'سرویس')
 
 
 def get_pack_meta(template_id: str) -> dict:

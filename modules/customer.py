@@ -29,12 +29,12 @@ from keyboards import (
     customer_keyboard,
     customer_menu_title,
 )
-from utils import answer_template, edit_or_answer, friendly_error, user_template_context, render_template_html, render_custom_emoji_output
+from utils import answer_template, edit_or_answer, friendly_error, user_template_context, render_template_html, render_custom_emoji_output, render_template_text
 import modules.payment_engine as payment_engine
 from modules import edit_runtime
 from modules.qr_tools import send_qr_photo, make_qr_file
 from modules import tetrapay, plisio_pay
-from modules.packs import public_price_for_pack
+from modules.packs import public_price_for_pack, render_package_button_text
 
 customer_router = Router()
 
@@ -450,7 +450,8 @@ def customer_packs_keyboard(items: list[tuple[dict, dict]], product_id: int | No
         template_id = str(pack.get('id'))
         rows.append([
             InlineKeyboardButton(
-                text=f"📦 {pack_title(pack)} | {format_toman(meta.get('effective_price_amount', meta.get('price_amount')))}",
+                text=render_package_button_text(pack, meta),
+                style=(None if str(db.get_setting('customer_pack_button_style', 'primary') or 'primary') == 'default' else str(db.get_setting('customer_pack_button_style', 'primary') or 'primary')),
                 callback_data=f'cust_pack:{template_id}',
             )
         ])
@@ -505,7 +506,8 @@ def customer_renew_packs_keyboard(items: list[tuple[dict, dict]], service_id: in
         template_id = str(pack.get('id'))
         rows.append([
             InlineKeyboardButton(
-                text=f"📦 {pack_title(pack)} | {format_toman(meta.get('effective_price_amount', meta.get('price_amount')))}",
+                text=render_package_button_text(pack, meta),
+                style=(None if str(db.get_setting('customer_pack_button_style', 'primary') or 'primary') == 'default' else str(db.get_setting('customer_pack_button_style', 'primary') or 'primary')),
                 callback_data=f'cust_renew_pack:{service_id}:{template_id}',
             )
         ])
@@ -569,7 +571,7 @@ def services_list_keyboard(services: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def service_detail_keyboard(service_id: int) -> InlineKeyboardMarkup:
+def service_detail_keyboard(service_id: int, context: dict | None = None) -> InlineKeyboardMarkup:
     specs = [
         ('service_btn_refresh_text','service_btn_refresh_style','🔄 بروزرسانی',f'cust_service_refresh:{service_id}'),
         ('service_btn_configs_text','service_btn_configs_style','📋 دریافت کانفیگ ها',f'cust_service_configs:{service_id}'),
@@ -580,9 +582,13 @@ def service_detail_keyboard(service_id: int) -> InlineKeyboardMarkup:
         ('service_btn_delete_text','service_btn_delete_style','🗑 حذف سرویس',f'cust_service_delete_start:{service_id}'),
         ('service_btn_back_text','service_btn_back_style','🔙 بازگشت به سرویس های من','cust_services'),
     ]
+    if context is None:
+        service = db.get_user_service(service_id) or {}
+        context = _service_detail_context(service, None) if service else {}
     rows=[]
     for text_key,style_key,default,callback_data in specs:
-        text=str(db.get_setting(text_key,default) or default)
+        template=str(db.get_setting(text_key,default) or default)
+        text=render_template_text(template, context)
         style=str(db.get_setting(style_key,'default') or 'default')
         rows.append([InlineKeyboardButton(text=text, callback_data=callback_data, style=(None if style=='default' else style))])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -964,7 +970,7 @@ async def show_service_detail_photo(callback: CallbackQuery, service: dict, user
             caption=caption,
             filename=f"service_{service.get('service_username') or service.get('id') or 'status'}.png",
             parse_mode='HTML',
-            reply_markup=service_detail_keyboard(int(service['id'])),
+            reply_markup=service_detail_keyboard(int(service['id']), detail_context),
         )
     if sent:
         try:
@@ -1674,7 +1680,7 @@ async def service_detail(callback: CallbackQuery, state: FSMContext):
             user_data = {}
     sent = await show_service_detail_photo(callback, service, user_data)
     if not sent:
-        await edit_or_answer(callback, build_service_detail_text(service, user_data), reply_markup=service_detail_keyboard(service_id), parse_mode='Markdown')
+        await edit_or_answer(callback, build_service_detail_text(service, user_data), reply_markup=service_detail_keyboard(service_id, _service_detail_context(service, user_data)), parse_mode='Markdown')
     await callback.answer()
 
 
@@ -1689,7 +1695,7 @@ async def service_refresh(callback: CallbackQuery):
         service, user_data = await refresh_service_from_panel(service)
         sent = await show_service_detail_photo(callback, service, user_data)
         if not sent:
-            await edit_or_answer(callback, build_service_detail_text(service, user_data), reply_markup=service_detail_keyboard(service_id), parse_mode='Markdown')
+            await edit_or_answer(callback, build_service_detail_text(service, user_data), reply_markup=service_detail_keyboard(service_id, _service_detail_context(service, user_data)), parse_mode='Markdown')
         await callback.answer('بروزرسانی شد.')
     except Exception as exc:
         db.record_system_error('customer.service_refresh', str(exc), user_id=callback.from_user.id, entity_type='service', entity_id=str(service_id), error_type=type(exc).__name__)

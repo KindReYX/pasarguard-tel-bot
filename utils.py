@@ -206,7 +206,7 @@ async def render_custom_emoji_plain(bot: Bot | None, text: str | None) -> str:
     return CUSTOM_EMOJI_RE.sub(lambda m: alts.get(str(m.group(1)), '⭐'), raw)
 
 
-def normalize_custom_emoji_markup(markup):
+def normalize_custom_emoji_markup(markup, context: dict[str, Any] | None = None):
     """Normalize premium emoji for every outgoing Inline/Reply keyboard.
 
     This is a final safety net in addition to the constructor patch. It also fixes
@@ -233,6 +233,8 @@ def normalize_custom_emoji_markup(markup):
         out_row = []
         for button in list(row or []):
             raw_text = str(getattr(button, 'text', '') or '')
+            if context:
+                raw_text = render_template_text(raw_text, context)
             visible, parsed_id = split_button_custom_emoji(raw_text)
             current_id = getattr(button, 'icon_custom_emoji_id', None)
             emoji_id = current_id or parsed_id
@@ -460,6 +462,7 @@ COPYABLE_TEMPLATE_VARS = {
     'card_number', 'sub_link', 'subscription_url', 'order_id', 'user_id', 'package_id',
     'service_name', 'service_username', 'panel_username', 'username', 'client',
     'receipt_id', 'entity_id', 'ticket_id', 'coupon_code', 'payment_id', 'transaction_id',
+    'ref_link', 'referral_link',
 }
 
 def _template_value_html(key: str, value: Any) -> str:
@@ -823,6 +826,71 @@ def resolved_button_style(text: str | None = None, callback_data: str | None = N
     return get_button_style(fallback_kind or infer_button_kind(str(text or '')))
 
 
+
+def button_identity_context(callback_data: str | None = None) -> dict[str, Any]:
+    """Best-effort variable context for dynamic buttons.
+
+    This is intentionally read-only and DB-backed. It lets button templates/Live Edit
+    use entity variables without changing callbacks or business state. Unknown callback
+    families simply return an empty context, leaving unsupported placeholders visible
+    instead of guessing a value.
+    """
+    cb = str(callback_data or '')
+    ctx: dict[str, Any] = {}
+    try:
+        import db
+        m = re.match(r'^cust_product:(\d+)$', cb)
+        if m:
+            row = db.fetchone('SELECT * FROM products WHERE id=?', (int(m.group(1)),)) or {}
+            if row:
+                price = int(row.get('public_price_amount') or 0)
+                ctx.update({
+                    'product_id': row.get('id') or '',
+                    'product_name': row.get('name') or '',
+                    'public_price_per_gb': f'{price:,} تومان',
+                    'public_price_per_gb_raw': price,
+                })
+            return ctx
+        m = re.match(r'^cust_(?:service|service_refresh|service_configs|service_revoke|service_renew|service_auto_renew|service_transfer|service_delete_start):(\d+)$', cb)
+        if m:
+            row = db.get_user_service(int(m.group(1))) or {}
+            if row:
+                ctx.update({
+                    'service_id': row.get('id') or '',
+                    'service_name': row.get('service_username') or row.get('panel_username') or '',
+                    'service_username': row.get('service_username') or row.get('panel_username') or '',
+                    'panel_username': row.get('panel_username') or row.get('service_username') or '',
+                    'package_name': row.get('package_name') or '',
+                    'package_id': row.get('package_id') or '',
+                    'order_id': row.get('order_id') or '',
+                    'status': row.get('status') or '',
+                    'data_limit': row.get('data_limit') or '',
+                    'expire_at': row.get('expire_at') or '',
+                })
+            return ctx
+        # Common order-centric callbacks: take the last numeric component and only use
+        # it if a real order with that id exists.
+        if any(token in cb for token in ('order', 'receipt', 'delivery', 'approve', 'retry')):
+            nums = re.findall(r'(?:^|:)(\d+)(?:$|:)', cb)
+            if nums:
+                row = db.get_order(int(nums[-1])) or {}
+                if row:
+                    amount = int(row.get('amount_toman') or row.get('amount') or 0)
+                    ctx.update({
+                        'order_id': row.get('id') or '',
+                        'user_id': row.get('user_id') or '',
+                        'package_id': row.get('package_id') or '',
+                        'package_name': row.get('package_name') or '',
+                        'service_name': row.get('service_username') or row.get('service_name') or '',
+                        'price': f'{amount:,} تومان',
+                        'price_raw': amount,
+                        'status': row.get('status') or '',
+                    })
+    except Exception:
+        return {}
+    return ctx
+
+
 _BUTTON_STYLE_PATCHED = False
 
 def install_button_style_patch() -> None:
@@ -847,7 +915,7 @@ def install_button_style_patch() -> None:
         generic_style = None
         # Edit-mode overrides are resolved before premium emoji parsing. Callback
         # data stays untouched, so changing a label never changes its real action.
-        if not str(callback_data or '').startswith('editmode:') and not str(callback_data or '').startswith(('cust_service_refresh:', 'cust_service_configs:', 'cust_service_revoke:', 'cust_service_renew:', 'cust_service_auto_renew:', 'cust_service_transfer:', 'cust_service_delete_start:')) and str(callback_data or '') != 'cust_services':
+        if not str(callback_data or '').startswith('editmode:') and not str(callback_data or '').startswith(('cust_pack:', 'cust_service_refresh:', 'cust_service_configs:', 'cust_service_revoke:', 'cust_service_renew:', 'cust_service_auto_renew:', 'cust_service_transfer:', 'cust_service_delete_start:')) and str(callback_data or '') != 'cust_services':
             try:
                 from modules import edit_runtime
                 stable = edit_runtime.button_stable_key(source_text, callback_data, url, detail)
@@ -857,6 +925,7 @@ def install_button_style_patch() -> None:
                 generic_style = edit_runtime.get_button_style_override(stable)
             except Exception:
                 generic_style = None
+        raw_text = render_template_text(raw_text, button_identity_context(callback_data))
         text, custom_emoji_id = split_button_custom_emoji(raw_text)
         if source_text is not None:
             kwargs['text'] = text
@@ -1299,7 +1368,9 @@ def install_edit_mode_output_patch() -> None:
 
     def _finalize_markup(kwargs: dict) -> None:
         if 'reply_markup' in kwargs and kwargs.get('reply_markup') is not None:
-            kwargs['reply_markup'] = normalize_custom_emoji_markup(kwargs.get('reply_markup'))
+            hint = edit_runtime.current_text_hint()
+            context = dict((hint or {}).get('variables') or {})
+            kwargs['reply_markup'] = normalize_custom_emoji_markup(kwargs.get('reply_markup'), context=context)
 
     async def patched_answer(self: Message, text: str, *args, **kwargs):
         final_text, target, force_html = await _resolve_text(self, 'answer', str(text or ''))

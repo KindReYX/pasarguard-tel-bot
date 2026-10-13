@@ -10,7 +10,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, C
 
 import api_client
 import db
-from utils import edit_or_answer, answer_callback
+from utils import edit_or_answer, answer_callback, message_text_with_custom_emoji_tokens, split_button_custom_emoji
 from keyboards import EditableButtonFilter
 from keyboards import BTN_PACKAGES, back_keyboard
 from permissions import can_manage_packs, can_view_packs, deny_message, deny_callback
@@ -30,6 +30,7 @@ class PackStates(StatesGroup):
     edit_groups = State()
     price_value = State()
     bulk_price_percent = State()
+    button_template_value = State()
 
 def pack_create_back_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='⬅️ بازگشت', callback_data='pack:create_cancel')]])
@@ -123,6 +124,74 @@ def effective_pack_price(meta: dict, pack: dict | None = None) -> int:
     return int(meta.get('price_amount') or 0)
 
 
+
+
+PACKAGE_BUTTON_DEFAULT_TEMPLATE = "📦 {package_name} | {price}"
+PACKAGE_BUTTON_VARIABLES = {
+    'package_name', 'name', 'package_id', 'template_id', 'volume_gb', 'traffic_gb', 'data_gb', 'gb',
+    'price', 'price_toman', 'price_raw', 'duration_days', 'days', 'duration_months',
+    'product_name', 'product_id',
+}
+
+
+def _pretty_decimal(value: Decimal) -> str:
+    q = value.quantize(Decimal('0.01'))
+    text = format(q, 'f').rstrip('0').rstrip('.')
+    return text or '0'
+
+
+def package_button_context(pack: dict, meta: dict) -> dict[str, str]:
+    gb = pack_volume_gb(pack)
+    seconds = int(pack.get('expire_duration') or 0)
+    days = Decimal(seconds) / Decimal(86400) if seconds > 0 else Decimal('0')
+    months = days / Decimal(30) if days > 0 else Decimal('0')
+    price_raw = effective_pack_price(meta, pack)
+    product_id = meta.get('product_id')
+    product_name = ''
+    if product_id:
+        row = db.fetchone('SELECT name FROM products WHERE id=?', (int(product_id),)) or {}
+        product_name = str(row.get('name') or '')
+    name = pack_title(pack)
+    tid = str(pack.get('id') or meta.get('template_id') or '')
+    return {
+        'package_name': name, 'name': name, 'package_id': tid, 'template_id': tid,
+        'volume_gb': _pretty_decimal(gb), 'traffic_gb': _pretty_decimal(gb), 'data_gb': _pretty_decimal(gb), 'gb': _pretty_decimal(gb),
+        'price': format_price(price_raw), 'price_toman': f'{int(price_raw):,}', 'price_raw': str(int(price_raw)),
+        'duration_days': _pretty_decimal(days), 'days': _pretty_decimal(days),
+        'duration_months': _pretty_decimal(months),
+        'product_name': product_name, 'product_id': str(product_id or ''),
+    }
+
+
+def validate_package_button_template(template: str) -> str:
+    template = str(template or '').strip()
+    if not template:
+        raise ValueError('قالب دکمه نمی‌تواند خالی باشد.')
+    fields = set(re.findall(r'\{([A-Za-z0-9_]+)\}', template))
+    unknown = sorted(fields - PACKAGE_BUTTON_VARIABLES)
+    if unknown:
+        raise ValueError('متغیر ناشناخته: ' + ', '.join('{' + x + '}' for x in unknown))
+    return template
+
+
+def package_button_template(meta: dict) -> str:
+    custom = str(meta.get('button_template') or '').strip()
+    if custom:
+        return custom
+    return str(db.get_setting('customer_pack_button_template', PACKAGE_BUTTON_DEFAULT_TEMPLATE) or PACKAGE_BUTTON_DEFAULT_TEMPLATE)
+
+
+def render_package_button_text(pack: dict, meta: dict) -> str:
+    template = package_button_template(meta)
+    ctx = package_button_context(pack, meta)
+    try:
+        rendered = template.format_map(ctx)
+    except Exception:
+        rendered = PACKAGE_BUTTON_DEFAULT_TEMPLATE.format_map(ctx)
+    # Button custom emoji token(s) are deliberately kept here; utils' global
+    # button constructor converts the first token to icon_custom_emoji_id.
+    return str(rendered).strip() or PACKAGE_BUTTON_DEFAULT_TEMPLATE.format_map(ctx)
+
 def format_price(amount: int | None, currency: str = 'TOMAN') -> str:
     amount = int(amount or 0)
     return f'{amount:,} تومان'
@@ -208,6 +277,7 @@ def detail_text(pack: dict) -> str:
         f'قیمت فروش: {price} ({price_mode})\n'
         + (f"قیمت عمومی هر گیگ: {int((db.fetchone('SELECT public_price_amount FROM products WHERE id=?', (int(meta.get('product_id')),)) or {}).get('public_price_amount') or 0):,} تومان\n" if int(meta.get('use_product_price') or 0) and meta.get('product_id') else '')
         + f'نمایش در ربات: {visible}\n'
+        + f'قالب دکمه مشتری: {"اختصاصی" if str(meta.get("button_template") or "").strip() else "عمومی"}\n'
         f'ترتیب نمایش: {meta.get("sort_order", 1000)}\n'
         f'پیش از نام: {pack.get("username_prefix") or "ندارد"}\n'
         f'پس از نام: {pack.get("username_suffix") or "ندارد"}\n\n'
@@ -232,6 +302,7 @@ def detail_keyboard(template_id: str, can_manage: bool) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text='✏️ نام', callback_data=f'pack:edit:{template_id}:name'), InlineKeyboardButton(text='📦 حجم', callback_data=f'pack:edit:{template_id}:data_limit')],
             [InlineKeyboardButton(text='⏳ مدت', callback_data=f'pack:edit:{template_id}:expire_duration'), InlineKeyboardButton(text='👥 گروه‌ها', callback_data=f'pack:edit:{template_id}:group_ids')],
             [InlineKeyboardButton(text='⬅️ پیش از نام', callback_data=f'pack:edit:{template_id}:username_prefix'), InlineKeyboardButton(text='➡️ پس از نام', callback_data=f'pack:edit:{template_id}:username_suffix')],
+            [InlineKeyboardButton(text='🧩 قالب دکمه مشتری', callback_data=f'pack:button_template:{template_id}')],
             [InlineKeyboardButton(text='👁 نمایش/عدم نمایش', callback_data=f'pack:visible:{template_id}')],
             [InlineKeyboardButton(text='⬆️ بالا', callback_data=f'pack:sort:{template_id}:-1'), InlineKeyboardButton(text='⬇️ پایین', callback_data=f'pack:sort:{template_id}:1')],
             [InlineKeyboardButton(text='🗑 حذف', callback_data=f'pack:delete:{template_id}')],
@@ -682,6 +753,71 @@ async def pack_edit_group_done(callback: CallbackQuery, state: FSMContext):
     await edit_or_answer(callback, 'ذخیره شد.\n\n' + detail_text(updated), reply_markup=detail_keyboard(str(template_id), True))
     await callback.answer()
 
+
+
+@packs_router.callback_query(F.data.startswith('pack:button_template:'))
+async def pack_button_template_start(callback: CallbackQuery, state: FSMContext):
+    if not can_manage_packs(callback.from_user.id):
+        await deny_callback(callback); return
+    template_id = callback.data.split(':')[-1]
+    meta = get_pack_meta(template_id)
+    try:
+        pack = await api_client.get_user_template(template_id)
+    except Exception:
+        await callback.answer('جزئیات بسته از پنل دریافت نشد.', show_alert=True); return
+    current = package_button_template(meta)
+    preview = render_package_button_text(pack, meta)
+    await state.set_state(PackStates.button_template_value)
+    await state.update_data(template_id=template_id)
+    rows = [[InlineKeyboardButton(text='↩️ استفاده از قالب عمومی', callback_data=f'pack:button_template_reset:{template_id}')],
+            [InlineKeyboardButton(text='⬅️ بازگشت', callback_data=f'pack:view:{template_id}')]]
+    await callback.message.answer(
+        '🧩 قالب دکمه همین بسته\n\n'
+        f'قالب فعلی:\n{current}\n\n'
+        f'پیش‌نمایش فعلی:\n{preview}\n\n'
+        'متغیرها:\n'
+        '{package_name} {volume_gb} {price} {price_raw} {duration_days} {duration_months} '
+        '{product_name} {package_id}\n\n'
+        'می‌توانی قبل/بین/بعد متغیرها متن یا Premium Emoji بگذاری. قالب جدید را بفرست.',
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    await callback.answer()
+
+
+@packs_router.message(PackStates.button_template_value)
+async def pack_button_template_value(message: Message, state: FSMContext):
+    if not can_manage_packs(message.from_user.id if message.from_user else None):
+        return
+    data = await state.get_data(); template_id = str(data.get('template_id') or '')
+    try:
+        raw = message_text_with_custom_emoji_tokens(message)
+        template = validate_package_button_template(raw)
+        meta = get_pack_meta(template_id)
+        pack = await api_client.get_user_template(template_id)
+        test_meta = dict(meta); test_meta['button_template'] = template
+        preview = render_package_button_text(pack, test_meta)
+        visible, _ = split_button_custom_emoji(preview)
+        if len(visible) > 64:
+            raise ValueError(f'متن نهایی دکمه {len(visible)} کاراکتر است؛ حداکثر 64 کاراکتر باشد.')
+        db.execute('UPDATE package_settings SET button_template=?, updated_at=? WHERE template_id=?', (template, db.now_iso(), template_id))
+        db.add_log(message.from_user.id, 'package_button_template_changed', 'pack', template_id, {'template': template})
+        await state.clear()
+        await message.answer('قالب دکمه ذخیره شد ✅\n\nپیش‌نمایش: ' + preview, reply_markup=detail_keyboard(template_id, True))
+    except Exception as exc:
+        await message.answer(f'خطا: {exc}')
+
+
+@packs_router.callback_query(F.data.startswith('pack:button_template_reset:'))
+async def pack_button_template_reset(callback: CallbackQuery, state: FSMContext):
+    if not can_manage_packs(callback.from_user.id):
+        await deny_callback(callback); return
+    template_id = callback.data.split(':')[-1]
+    db.execute('UPDATE package_settings SET button_template=NULL, updated_at=? WHERE template_id=?', (db.now_iso(), template_id))
+    db.add_log(callback.from_user.id, 'package_button_template_reset', 'pack', template_id, {})
+    await state.clear()
+    pack = await api_client.get_user_template(template_id)
+    await edit_or_answer(callback, 'قالب اختصاصی حذف شد و این بسته از قالب عمومی استفاده می‌کند.\n\n' + detail_text(pack), reply_markup=detail_keyboard(template_id, True))
+    await callback.answer('قالب عمومی فعال شد ✅')
 
 
 @packs_router.callback_query(F.data.startswith('pack:public_price:'))

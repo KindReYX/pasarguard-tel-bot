@@ -8,10 +8,45 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 import db
 from keyboards import BTN_REFERRAL, CustomerButtonFilter, back_keyboard
 from permissions import deny_callback, deny_message, is_admin, is_staff
-from utils import edit_or_answer, answer_callback
+from utils import edit_or_answer, answer_callback, answer_template, user_template_context
 
 referral_router = Router()
 
+
+
+REFERRAL_TEXT_DEFAULT = (
+    '👥 دعوت دوستان\n\n'
+    'لینک دعوت شما:\n{referral_link}\n\n'
+    'پاداش هر دعوت: {reward}\n'
+    'شرط دریافت پاداش: {condition}\n\n'
+    'کل دعوت ها: {total}\n'
+    'پاداش داده شده: {rewarded}\n'
+    'در انتظار: {pending}'
+)
+
+
+async def send_referral_page(message: Message, bot) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    stats = db.referral_stats(user_id)
+    me = await bot.get_me()
+    reward = db.referral_reward_amount()
+    condition = db.referral_condition()
+    condition_text = 'بعد از خرید موفق بسته' if condition == 'purchase' else 'بعد از ورود با لینک'
+    link = f'https://t.me/{me.username}?start=ref_{user_id}'
+    support = str(db.get_setting('support_username', '') or '')
+    context = user_template_context(message.from_user, support=support)
+    context.update({
+        'ref_link': link,
+        'referral_link': link,
+        'reward': format_toman(reward),
+        'reward_raw': int(reward or 0),
+        'condition': condition_text,
+        'total': int(stats.get('total') or 0),
+        'rewarded': int(stats.get('rewarded') or 0),
+        'pending': int(stats.get('pending') or 0),
+    })
+    template = str(db.get_setting('referral_text', REFERRAL_TEXT_DEFAULT) or REFERRAL_TEXT_DEFAULT)
+    await answer_template(message, template, context, content_key='referral_text')
 
 class ReferralAdminState(StatesGroup):
     reward = State()
@@ -58,22 +93,7 @@ async def referral_menu(message: Message, bot):
     if not bool(db.get_setting('referral_enabled', True)):
         await message.answer('دعوت دوستان فعلا غیرفعال است.')
         return
-    stats = db.referral_stats(user_id)
-    me = await bot.get_me()
-    reward = db.referral_reward_amount()
-    condition = db.referral_condition()
-    condition_text = 'بعد از خرید موفق بسته' if condition == 'purchase' else 'بعد از ورود با لینک'
-    link = f'https://t.me/{me.username}?start=ref_{user_id}'
-    await message.answer(
-        '👥 دعوت دوستان\n\n'
-        f'لینک دعوت شما:\n{copy_code(link)}\n\n'
-        f'پاداش هر دعوت: {format_toman(reward)}\n'
-        f'شرط دریافت پاداش: {condition_text}\n\n'
-        f'کل دعوت ها: {copy_code(stats["total"])}\n'
-        f'پاداش داده شده: {copy_code(stats["rewarded"])}\n'
-        f'در انتظار: {copy_code(stats["pending"])}',
-        parse_mode='Markdown',
-    )
+    await send_referral_page(message, bot)
 
 
 @referral_router.callback_query(F.data == 'ref_admin:toggle')

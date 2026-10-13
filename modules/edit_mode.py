@@ -103,11 +103,14 @@ def _effective_style(target: edit_runtime.ButtonTarget) -> str:
 
 def button_editor_markup(target: edit_runtime.ButtonTarget) -> InlineKeyboardMarkup:
     current_style = _effective_style(target)
-    rows = [[InlineKeyboardButton(
-        text='✏️ تغییر متن دکمه',
-        callback_data=f'editmode:button_text:{target.token}',
-        style='primary',
-    )]]
+    package_button = str(target.callback_data or '').startswith('cust_pack:')
+    rows = []
+    if not package_button:
+        rows.append([InlineKeyboardButton(
+            text='✏️ تغییر متن دکمه',
+            callback_data=f'editmode:button_text:{target.token}',
+            style='primary',
+        )])
     style_row = []
     for value in ('default', 'primary', 'success', 'danger'):
         label = STYLE_LABELS[value]
@@ -166,8 +169,8 @@ async def show_button_editor(message: Message, target: edit_runtime.ButtonTarget
         await message.answer(
             '🛠 ویرایش دکمه انتخاب‌شده\n\n'
             f'متن فعلی: {html.escape(visible)}{emoji_note}{menu_note}\n'
-            'تغییر متن فقط ظاهر را عوض می‌کند؛ callback/عملکرد اصلی دست‌نخورده می‌ماند.\n\n'
-            'برای دیدن عملکرد واقعی، «▶️ انجام عملکرد دکمه» را بزن.',
+            + ('متن دکمه‌های بسته از داخل تنظیمات خود بسته/قالب عمومی مدیریت می‌شود؛ در Live Edit فقط رنگ یا عملکرد قابل استفاده است.\n\n' if str(target.callback_data or '').startswith('cust_pack:') else 'تغییر متن فقط ظاهر را عوض می‌کند؛ callback/عملکرد اصلی دست‌نخورده می‌ماند.\n\n')
+            + 'برای دیدن عملکرد واقعی، «▶️ انجام عملکرد دکمه» را بزن.',
             reply_markup=button_editor_markup(target),
             parse_mode='HTML',
         )
@@ -541,6 +544,11 @@ async def edit_url_button(callback: CallbackQuery):
 
 @edit_router.callback_query(F.data.startswith('editmode:button_text:'))
 async def edit_button_text_start(callback: CallbackQuery):
+    token = callback.data.split(':')[-1]
+    target = edit_runtime.BUTTON_TARGETS.get(token)
+    if target and str(target.callback_data or '').startswith('cust_pack:'):
+        await callback.answer('متن دکمه بسته از داخل خود بسته تنظیم می‌شود.', show_alert=True)
+        return
     if not edit_runtime.is_active(callback.from_user.id):
         await callback.answer('حالت ویرایش فعال نیست.', show_alert=True)
         return

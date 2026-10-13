@@ -75,21 +75,22 @@ SETTINGS: list[SettingItem] = [
     SettingItem('support_button_text', 'متن دکمه پشتیبانی', 'texts', 'text', '🎫 پشتیبانی', 'ایموجی پریمیوم: خود ایموجی را مستقیم بفرستید یا [CUSTOM_EMOJI_ID] متن دکمه'),
     SettingItem('rules_button_text', 'متن دکمه قوانین', 'texts', 'text', '📜 قوانین', 'ایموجی پریمیوم: خود ایموجی را مستقیم بفرستید یا [CUSTOM_EMOJI_ID] متن دکمه'),
     SettingItem('package_username_prompt_text', 'متن بعد از انتخاب بسته / دریافت نام سرویس', 'general_texts', 'text', '📦 بسته انتخابی: {package_name}\n\nلطفا نام کاربری سرویس را ارسال کنید.\n\n⚠️ نام کاربری باید بدون کاراکترهای اضافه مانند @ ، فاصله ، خط تیره باشد.\n⚠️ نام کاربری باید انگلیسی باشد.\n✅ نام کاربری های صحیح: ali12 | mahdi | ws1_ksdf\n❌ نام کاربری های نادرست: ali_ | tele@ | _mahdi | محسن', 'متغیرها: {product_id} {product_name} {product_public_price_per_gb} {product_public_price_per_gb_raw} {custom_volume_gb} {custom_months} {custom_users} {package_name} {package_id} {package_price} {package_price_raw} {package_data_limit} {package_data_limit_raw} {package_duration} {package_duration_seconds} {username_prefix} {username_suffix} {hwid_limit} {package_status} {price} {price_raw} {data_limit} {data_limit_raw} {duration} {duration_seconds} {name} {first_name} {username} {user_id} {support}'),
-    SettingItem('referral_text', 'متن صفحه دعوت دوستان', 'general_texts', hint='متغیرها: {name} {user_id} {ref_link} {referral_link} {support}'),
+    SettingItem('referral_text', 'متن صفحه دعوت دوستان', 'general_texts', 'text', '👥 دعوت دوستان\n\nلینک دعوت شما:\n{referral_link}\n\nپاداش هر دعوت: {reward}\nشرط دریافت پاداش: {condition}\n\nکل دعوت ها: {total}\nپاداش داده شده: {rewarded}\nدر انتظار: {pending}', 'متغیرها: {name} {first_name} {username} {user_id} {ref_link} {referral_link} {reward} {reward_raw} {condition} {total} {rewarded} {pending} {support}'),
     SettingItem('invoice_text', 'قالب فاکتور خرید', 'general_texts', 'text', '🧾 فاکتور خرید\n\nشماره سفارش: {order_id}\nآیدی عددی کاربر: {user_id}\nمحصول: {product_name}\nنام بسته: {package_name}\nنام سرویس: {service_name}\nمبلغ اصلی: {price}\nتخفیف: {discount}\nکیف پول مصرف شده: {wallet_used}\nمبلغ قابل پرداخت: {payable}\nپرداخت Stars: {stars} ⭐️\nوضعیت سفارش: {status}\nتاریخ: {created_at}\n{service_message}', 'متغیرها: {order_id} {user_id} {product_id} {product_name} {product_public_price_per_gb} {product_public_price_per_gb_raw} {custom_volume_gb} {custom_months} {custom_users} {package_id} {package_name} {service_name} {price} {price_raw} {amount} {discount} {discount_raw} {wallet_used} {wallet_used_raw} {payable} {payable_raw} {stars} {status} {created_at} {service_message} {sub_link}'),
     SettingItem('service_ready_text', 'متن آماده شدن سرویس', 'general_texts', hint='متغیرها: {name} {user_id} {order_id} {product_id} {product_name} {product_public_price_per_gb} {product_public_price_per_gb_raw} {custom_volume_gb} {custom_months} {custom_users} {package_name} {service_name} {price} {sub_link} {support}'),
     SettingItem('service_detail_text', 'قالب جزئیات/وضعیت سرویس', 'general_texts', 'text', '🔗 {sub_link}\n📊 وضعیت سرویس : {status}\n👤 نام سرویس : {service_name}\n\n🌍 موقعیت سرویس : 🌟 پلن حجمی\n🛍 محصول : {product_name}\n📦 بسته : {package_name}\n🧾 شماره سفارش : {order_id}\n🗓 تاریخ خرید : {purchase_date}\n\n🔋 ترافیک : {data_limit}\n📥 حجم مصرفی : {used_traffic}\n💢 حجم باقی مانده : {remaining_traffic} ({remaining_percent}%)\n\n📅 تاریخ اتمام : {expire_at} ({expire_remaining})\n\n📶 آخرین زمان اتصال : {last_online}\n🔄 آخرین زمان آپدیت لینک اشتراک : {subscription_updated}\n#️⃣ کلاینت متصل شده : {client}', 'متغیرها: {sub_link} {status} {service_name} {product_id} {product_name} {product_public_price_per_gb} {product_public_price_per_gb_raw} {custom_volume_gb} {custom_months} {custom_users} {package_name} {order_id} {purchase_date} {data_limit} {used_traffic} {remaining_traffic} {remaining_percent} {expire_at} {expire_remaining} {last_online} {subscription_updated} {client}'),
     SettingItem('payment_error_text', 'متن عمومی خطای پرداخت برای مشتری', 'general_texts', default='در حال حاضر امکان ساخت لینک پرداخت وجود ندارد. لطفا کمی بعد دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.'),
     SettingItem('renew_warning_text', 'متن هشدار رو به اتمام سرویس', 'general_texts', 'text', '⏰ سرویس شما رو به اتمام است.\n\n📦 بسته: {package_name}\n👤 سرویس: {service_name}\n⏳ زمان باقی‌مانده: {remaining_time}\n📅 تاریخ اتمام: {expire_at}\n\nبرای جلوگیری از قطع شدن، از بخش سرویس‌های من تمدید کنید.', 'متغیرها: {name} {first_name} {username} {user_id} {service_name} {product_id} {product_name} {product_public_price_per_gb} {product_public_price_per_gb_raw} {custom_volume_gb} {custom_months} {custom_users} {package_name} {package_id} {days} {hours} {remaining_time} {expire_at} {support} | ایموجی پریمیوم: مستقیم یا [CUSTOM_EMOJI_ID]'),
     # Public service-page buttons (text + style).
-    SettingItem('service_btn_refresh_text', 'بروزرسانی', 'public_buttons', 'text', '🔄 بروزرسانی', 'Premium Emoji: مستقیم یا [CUSTOM_EMOJI_ID]'),
-    SettingItem('service_btn_configs_text', 'دریافت کانفیگ ها', 'public_buttons', 'text', '📋 دریافت کانفیگ ها', 'Premium Emoji: مستقیم یا [CUSTOM_EMOJI_ID]'),
-    SettingItem('service_btn_revoke_text', 'تغییر لینک', 'public_buttons', 'text', '♻️ تغییر لینک', 'Premium Emoji: مستقیم یا [CUSTOM_EMOJI_ID]'),
-    SettingItem('service_btn_renew_text', 'تمدید سرویس', 'public_buttons', 'text', '🔁 تمدید سرویس', 'Premium Emoji: مستقیم یا [CUSTOM_EMOJI_ID]'),
-    SettingItem('service_btn_auto_renew_text', 'تمدید خودکار', 'public_buttons', 'text', '🤖 تمدید خودکار', 'Premium Emoji: مستقیم یا [CUSTOM_EMOJI_ID]'),
-    SettingItem('service_btn_transfer_text', 'انتقال سرویس', 'public_buttons', 'text', '👤 انتقال سرویس', 'Premium Emoji: مستقیم یا [CUSTOM_EMOJI_ID]'),
-    SettingItem('service_btn_delete_text', 'حذف سرویس', 'public_buttons', 'text', '🗑 حذف سرویس', 'Premium Emoji: مستقیم یا [CUSTOM_EMOJI_ID]'),
-    SettingItem('service_btn_back_text', 'بازگشت به سرویس های من', 'public_buttons', 'text', '🔙 بازگشت به سرویس های من', 'Premium Emoji: مستقیم یا [CUSTOM_EMOJI_ID]'),
+    SettingItem('service_btn_refresh_text', 'بروزرسانی', 'public_buttons', 'text', '🔄 بروزرسانی', 'Premium Emoji: مستقیم یا [CUSTOM_EMOJI_ID] | متغیرهای سرویس: {service_name} {service_username} {package_name} {product_name} {order_id} {status} {data_limit} {remaining_traffic} {expire_at}'),
+    SettingItem('service_btn_configs_text', 'دریافت کانفیگ ها', 'public_buttons', 'text', '📋 دریافت کانفیگ ها', 'Premium Emoji: مستقیم یا [CUSTOM_EMOJI_ID] | متغیرهای سرویس: {service_name} {service_username} {package_name} {product_name} {order_id} {status} {data_limit} {remaining_traffic} {expire_at}'),
+    SettingItem('service_btn_revoke_text', 'تغییر لینک', 'public_buttons', 'text', '♻️ تغییر لینک', 'Premium Emoji: مستقیم یا [CUSTOM_EMOJI_ID] | متغیرهای سرویس: {service_name} {service_username} {package_name} {product_name} {order_id} {status} {data_limit} {remaining_traffic} {expire_at}'),
+    SettingItem('service_btn_renew_text', 'تمدید سرویس', 'public_buttons', 'text', '🔁 تمدید سرویس', 'Premium Emoji: مستقیم یا [CUSTOM_EMOJI_ID] | متغیرهای سرویس: {service_name} {service_username} {package_name} {product_name} {order_id} {status} {data_limit} {remaining_traffic} {expire_at}'),
+    SettingItem('service_btn_auto_renew_text', 'تمدید خودکار', 'public_buttons', 'text', '🤖 تمدید خودکار', 'Premium Emoji: مستقیم یا [CUSTOM_EMOJI_ID] | متغیرهای سرویس: {service_name} {service_username} {package_name} {product_name} {order_id} {status} {data_limit} {remaining_traffic} {expire_at}'),
+    SettingItem('service_btn_transfer_text', 'انتقال سرویس', 'public_buttons', 'text', '👤 انتقال سرویس', 'Premium Emoji: مستقیم یا [CUSTOM_EMOJI_ID] | متغیرهای سرویس: {service_name} {service_username} {package_name} {product_name} {order_id} {status} {data_limit} {remaining_traffic} {expire_at}'),
+    SettingItem('service_btn_delete_text', 'حذف سرویس', 'public_buttons', 'text', '🗑 حذف سرویس', 'Premium Emoji: مستقیم یا [CUSTOM_EMOJI_ID] | متغیرهای سرویس: {service_name} {service_username} {package_name} {product_name} {order_id} {status} {data_limit} {remaining_traffic} {expire_at}'),
+    SettingItem('service_btn_back_text', 'بازگشت به سرویس های من', 'public_buttons', 'text', '🔙 بازگشت به سرویس های من', 'Premium Emoji: مستقیم یا [CUSTOM_EMOJI_ID] | متغیرهای سرویس: {service_name} {service_username} {package_name} {product_name} {order_id} {status} {data_limit} {remaining_traffic} {expire_at}'),
+    SettingItem('customer_pack_button_template', 'قالب عمومی دکمه بسته‌های خرید', 'public_buttons', 'text', '📦 {package_name} | {price}', 'متغیرها: {package_name} {name} {package_id} {template_id} {volume_gb} {traffic_gb} {gb} {price} {price_toman} {price_raw} {duration_days} {days} {duration_months} {product_name} {product_id}'),
 
 
     # Telegram Bot API button styles
@@ -247,6 +248,7 @@ def category_keyboard(group: str) -> InlineKeyboardMarkup:
     if group == 'public_buttons':
         return InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text='📱 دکمه‌های صفحه سرویس', callback_data='adv:public:service')],
+            [InlineKeyboardButton(text='📦 دکمه‌های بسته‌های خرید', callback_data='adv:public:packages')],
             [InlineKeyboardButton(text='🔙 برگشت به گروه ها', callback_data='adv:home')],
         ])
     rows = []
@@ -361,6 +363,56 @@ def service_buttons_admin_keyboard() -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text='🔙 دکمه‌های عمومی', callback_data='adv:cat:public_buttons')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+
+
+def package_buttons_admin_keyboard() -> InlineKeyboardMarkup:
+    current = str(db.get_setting('customer_pack_button_style', 'primary') or 'primary')
+    labels = {'default':'⚪ پیش‌فرض','primary':'🔵 آبی','success':'🟢 سبز','danger':'🔴 قرمز'}
+    rows = [[InlineKeyboardButton(text='✏️ قالب نوشتاری عمومی', callback_data='adv:edit:customer_pack_button_template')]]
+    rows.append([InlineKeyboardButton(text=f'🎨 رنگ/پس‌زمینه: {labels.get(current,current)}', callback_data='adv:packstyle')])
+    rows.append([InlineKeyboardButton(text='🔙 دکمه‌های عمومی', callback_data='adv:cat:public_buttons')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@advanced_router.callback_query(F.data == 'adv:public:packages')
+async def advanced_public_package_buttons(callback: CallbackQuery):
+    if not is_super_admin(callback.from_user.id):
+        await deny_callback(callback); return
+    template = str(db.get_setting('customer_pack_button_template', '📦 {package_name} | {price}') or '📦 {package_name} | {price}')
+    await edit_or_answer(
+        callback,
+        '📦 دکمه‌های بسته‌های خرید\n\n'
+        f'قالب عمومی فعلی:\n{template}\n\n'
+        'متغیرها: {package_name} {name} {package_id} {template_id} {volume_gb} {traffic_gb} {gb} {price} {price_toman} {price_raw} {duration_days} {days} {duration_months} {product_name} {product_id}\n\n'
+        'قالب اختصاصی هر بسته از داخل همان بسته قابل تنظیم است.',
+        reply_markup=package_buttons_admin_keyboard(),
+    )
+    await answer_callback(callback)
+
+
+@advanced_router.callback_query(F.data == 'adv:packstyle')
+async def advanced_package_button_style(callback: CallbackQuery):
+    if not is_super_admin(callback.from_user.id):
+        await deny_callback(callback); return
+    current = str(db.get_setting('customer_pack_button_style', 'primary') or 'primary')
+    opts=[('default','⚪ پیش‌فرض'),('primary','🔵 آبی'),('success','🟢 سبز'),('danger','🔴 قرمز')]
+    rows=[[InlineKeyboardButton(text=('✅ ' if v==current else '')+label, callback_data=f'adv:packstyleset:{v}', style=(None if v=='default' else v))] for v,label in opts]
+    rows.append([InlineKeyboardButton(text='🔙 دکمه‌های بسته‌ها', callback_data='adv:public:packages')])
+    await edit_or_answer(callback, '🎨 رنگ/پس‌زمینه کلی دکمه‌های بسته خرید', reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await answer_callback(callback)
+
+
+@advanced_router.callback_query(F.data.startswith('adv:packstyleset:'))
+async def advanced_package_button_style_set(callback: CallbackQuery):
+    if not is_super_admin(callback.from_user.id):
+        await deny_callback(callback); return
+    value = callback.data.split(':')[-1]
+    if value not in {'default','primary','success','danger'}:
+        await callback.answer('مقدار نامعتبر است.', show_alert=True); return
+    db.set_setting('customer_pack_button_style', value)
+    db.add_log(callback.from_user.id, 'customer_pack_button_style_changed', 'settings', 'customer_pack_button_style', {'style': value})
+    await callback.answer('ذخیره شد ✅')
+    await advanced_package_button_style(callback)
 
 @advanced_router.callback_query(F.data == 'adv:public:service')
 async def advanced_public_service_buttons(callback: CallbackQuery):

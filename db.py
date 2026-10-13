@@ -231,6 +231,7 @@ def init_db() -> None:
                 price_amount INTEGER DEFAULT 0,
                 price_currency TEXT DEFAULT 'TOMAN',
                 use_product_price INTEGER DEFAULT 0,
+                button_template TEXT,
                 updated_at TEXT,
                 FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE SET NULL
             );
@@ -449,6 +450,8 @@ def _run_migrations() -> None:
                 conn.execute(f'ALTER TABLE products ADD COLUMN {col} {spec}')
         if not _column_exists('package_settings', 'use_product_price', conn):
             conn.execute('ALTER TABLE package_settings ADD COLUMN use_product_price INTEGER DEFAULT 0')
+        if not _column_exists('package_settings', 'button_template', conn):
+            conn.execute('ALTER TABLE package_settings ADD COLUMN button_template TEXT')
 
         if not _column_exists('orders', 'customer_username', conn):
             conn.execute('ALTER TABLE orders ADD COLUMN customer_username TEXT')

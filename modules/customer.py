@@ -1669,7 +1669,7 @@ async def service_import_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(CustomerImportServiceState.waiting_access)
     await edit_or_answer(
         callback,
-        '➕ اضافه کردن کانفیگ\n\nیک کانفیگ دارای UUID یا لینک Subscription همان سرویس را ارسال کنید.\n\nربات فقط UUID را استخراج می‌کند و سرویس دارای همان UUID را در پنل پیدا می‌کند.',
+        '➕ اضافه کردن کانفیگ\n\nیک کانفیگ دارای UUID یا لینک Subscription را ارسال کنید.\n\nربات فقط UUID را می‌خواند و همان UUID را مستقیم در پنل جستجو می‌کند.',
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ انصراف', callback_data='cust_services')]]),
     )
     await callback.answer()
@@ -1740,7 +1740,7 @@ async def service_import_finish(message: Message, state: FSMContext):
         if code == 'service_match_ambiguous':
             text = 'این UUID روی بیش از یک سرویس پیدا شد و برای جلوگیری از انتقال اشتباه چیزی تغییر نکرد.'
         elif code == 'service_uuid_missing':
-            text = 'هیچ UUID معتبری در ورودی پیدا نشد. یک کانفیگ دارای UUID یا لینک Subscription همان سرویس را ارسال کنید.'
+            text = 'هیچ UUIDی در ورودی پیدا نشد. یک کانفیگ دارای UUID یا لینک Subscription ارسال کنید.'
         else:
             text = 'هیچ سرویسی با این UUID در پنل پیدا نشد.'
         try:

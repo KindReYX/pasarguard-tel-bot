@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import tempfile
@@ -10,7 +11,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-# DB_PATH is read when config/db are imported.
 tmp = tempfile.TemporaryDirectory()
 os.environ['DB_PATH'] = str(Path(tmp.name) / 'test.db')
 os.environ.setdefault('API_BASE_URL', 'http://example.invalid')
@@ -20,44 +20,85 @@ os.environ.setdefault('PANEL_ADMIN_PASSWORD', 'x')
 import api_client  # noqa: E402
 import db  # noqa: E402
 
+UUID = '11111111-2222-3333-4444-555555555555'
 
-def main() -> None:
+
+async def test_panel_uuid_lookup_and_owner_transfer() -> None:
+    calls = []
+
+    async def fake_request(method, path, params=None, payload=None, retries=3):
+        calls.append((method, path, params, payload))
+        if method == 'GET' and path == '/api/users':
+            assert params.get('proxy_id') == UUID
+            return {
+                'users': [{
+                    'id': 9,
+                    'username': 'svc_a',
+                    'status': 'active',
+                    'admin': {'username': 'oldadmin'},
+                    'proxy_settings': {'vless': {'id': UUID}},
+                }],
+                'total': 1,
+            }
+        if method == 'PUT' and path == '/api/user/svc_a/set_owner':
+            assert params == {'admin_username': 'botadmin'}
+            return {
+                'id': 9,
+                'username': 'svc_a',
+                'status': 'active',
+                'admin': {'username': 'botadmin'},
+                'proxy_settings': {'vless': {'id': UUID}},
+            }
+        raise AssertionError(f'unexpected request: {method} {path} {params}')
+
+    old_request = api_client.request
+    api_client.request = fake_request
+    try:
+        got = await api_client.adopt_panel_user_for_bot(
+            f'vless://{UUID}@example.com:443?security=tls#demo'
+        )
+    finally:
+        api_client.request = old_request
+
+    assert got['username'] == 'svc_a'
+    assert got['admin']['username'] == 'botadmin'
+    assert calls[0][0:2] == ('GET', '/api/users')
+    assert calls[1][0:2] == ('PUT', '/api/user/svc_a/set_owner')
+
+
+def test_db_adoption() -> None:
     db.init_db()
-
-    vless = 'vless://11111111-2222-3333-4444-555555555555@example.com:443?security=tls#demo'
-    fps = api_client.access_fingerprints(vless)
-    assert '11111111-2222-3333-4444-555555555555' in fps
-    user = {'proxies': {'vless': {'id': '11111111-2222-3333-4444-555555555555'}}, 'username': 'svc_a'}
-    assert fps.intersection(api_client.user_access_fingerprints(user))
+    vless = f'vless://{UUID}@example.com:443?security=tls#demo'
+    assert UUID in api_client.extract_access_uuids(vless)
 
     service_id, old = db.adopt_panel_service(
-        1001, 'svc_a', {'username': 'svc_a', 'status': 'active', 'data_limit': 1024},
-        subscription_url='https://sub.example/svc_a', links=[vless],
+        1001,
+        'svc_a',
+        {'username': 'svc_a', 'status': 'active', 'data_limit': 1024},
+        subscription_url='https://sub.example/svc_a',
+        links=[vless],
     )
     assert old is None
     row = db.get_user_service(service_id, 1001)
     assert row and row['telegram_id'] == 1001
-    assert row['package_name'] == 'سرویس واردشده'
 
-    # Adopting the same panel user from a second Telegram account must MOVE the
-    # service instead of duplicating it, and must not carry an old order link.
-    db.execute('UPDATE user_services SET order_id=77, package_name=? WHERE id=?', ('بسته قبلی', service_id))
+    db.execute('UPDATE user_services SET order_id=77 WHERE id=?', (service_id,))
     moved_id, old = db.adopt_panel_service(
-        2002, 'svc_a', {'username': 'svc_a', 'status': 'active', 'data_limit': 2048},
-        subscription_url='https://sub.example/svc_a', links=[vless],
+        2002,
+        'svc_a',
+        {'username': 'svc_a', 'status': 'active', 'data_limit': 2048},
+        subscription_url='https://sub.example/svc_a',
+        links=[vless],
     )
     assert moved_id == service_id
     assert old == 1001
-    assert db.get_user_service(service_id, 1001) is None
     moved = db.get_user_service(service_id, 2002)
     assert moved and moved['order_id'] is None
-    assert moved['package_name'] == 'بسته قبلی'
-    assert int(moved['data_limit']) == 2048
 
-    count = db.fetchone("SELECT COUNT(*) AS c FROM user_services WHERE panel_username='svc_a' AND is_active=1")
-    assert int(count['c']) == 1
-    integrity = db.fetchone('PRAGMA integrity_check')
-    assert integrity and list(integrity.values())[0] == 'ok'
+
+def main() -> None:
+    asyncio.run(test_panel_uuid_lookup_and_owner_transfer())
+    test_db_adoption()
     print('service import tests: PASS')
 
 

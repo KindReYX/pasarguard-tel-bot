@@ -592,9 +592,9 @@ async def list_users(*, page_size: int = 200, max_users: int = 10000) -> list[di
 async def set_user_owner(username: str, admin_username: str) -> dict:
     """Transfer a panel user's owner to the bot's panel admin account.
 
-    Marzban/PasarGuard exposes this as PUT /api/user/{username}/set-owner with
+    PasarGuard 5.4.1 exposes this as PUT /api/user/{username}/set_owner with
     admin_username as a query parameter. The configured panel account must be a
-    sudo/full-access admin for cross-owner adoption.
+    full-access admin for cross-owner adoption.
     """
     username = str(username or '').strip()
     admin_username = str(admin_username or '').strip()
@@ -602,11 +602,11 @@ async def set_user_owner(username: str, admin_username: str) -> dict:
         raise ValueError('username/admin_username is empty')
     data = await request(
         'PUT',
-        f'/api/user/{username}/set-owner',
+        f'/api/user/{username}/set_owner',
         params={'admin_username': admin_username},
     )
     if not isinstance(data, dict):
-        raise RuntimeError('Invalid set-owner response')
+        raise RuntimeError('Invalid set_owner response')
     return data
 
 
@@ -640,7 +640,7 @@ def _decode_vmess_payload(link: str) -> dict:
         return {}
 
 
-UUID_RE = re.compile(r"(?i)(?<![0-9a-f])([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?![0-9a-f])")
+UUID_RE = re.compile(r"(?i)(?<![0-9a-f])([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?![0-9a-f])")
 
 
 def extract_access_uuids(value: Any) -> set[str]:
@@ -677,13 +677,35 @@ async def _submitted_uuids(raw_input: str) -> set[str]:
     return found
 
 
-async def resolve_panel_user_from_access_input(raw_input: str) -> dict:
-    """Resolve a service strictly by UUID.
+async def _users_by_proxy_uuid(proxy_uuid: str) -> list[dict]:
+    """Use PasarGuard's native proxy_id filter to locate the owning user."""
+    proxy_uuid = str(proxy_uuid or '').strip().lower()
+    if not proxy_uuid:
+        return []
+    try:
+        data = await request(
+            'GET',
+            '/api/users',
+            params={'proxy_id': proxy_uuid, 'offset': 0, 'limit': 50},
+        )
+    except PanelAPIError as exc:
+        # Some panel builds return 404 rather than an empty UsersResponse.
+        if exc.status == 404:
+            return []
+        raise
+    if not isinstance(data, dict):
+        return []
+    users = data.get('users') or []
+    return [u for u in users if isinstance(u, dict)]
 
-    The submitted config/subscription is used only to obtain one or more UUIDs.
-    Panel usernames, domains, subscription paths, fragments and display names are
-    intentionally ignored. Each panel user is fetched in detail before matching
-    because /api/users summaries may omit proxy UUIDs.
+
+async def resolve_panel_user_from_access_input(raw_input: str) -> dict:
+    """Resolve a service only by proxy UUID using the panel's official filter.
+
+    PasarGuard 5.4.1 supports GET /api/users?proxy_id=<uuid>.  We extract UUIDs
+    from the submitted config, or from configs returned by a subscription URL,
+    and ask the panel directly which user owns each UUID.  No domain, username,
+    display name, subscription path, or local heuristic participates in matching.
     """
     raw = str(raw_input or '').strip()
     if not raw:
@@ -693,26 +715,14 @@ async def resolve_panel_user_from_access_input(raw_input: str) -> dict:
     if not submitted_uuids:
         raise LookupError('service_uuid_missing')
 
-    users = await list_users()
     matches: dict[str, dict] = {}
-    for summary in users:
-        username = str(summary.get('username') or '').strip()
-        if not username:
-            continue
-
-        # Fast path in case this panel includes proxy data in list responses.
-        if extract_access_uuids(summary).intersection(submitted_uuids):
-            matches[username] = summary
-            continue
-
-        # Most Marzban/PasarGuard variants omit proxy details from /api/users.
-        # Fetch the full user object so UUID matching actually sees proxy UUIDs.
-        try:
-            detail = await get_user(username)
-        except Exception:
-            continue
-        if extract_access_uuids(detail).intersection(submitted_uuids):
-            matches[username] = detail
+    for proxy_uuid in sorted(submitted_uuids):
+        for user_data in await _users_by_proxy_uuid(proxy_uuid):
+            username = str(user_data.get('username') or '').strip()
+            user_id = user_data.get('id')
+            key = username or (f'id:{user_id}' if user_id is not None else '')
+            if key:
+                matches[key] = user_data
 
     if not matches:
         raise LookupError('service_not_found')

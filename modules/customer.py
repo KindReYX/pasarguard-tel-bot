@@ -134,6 +134,12 @@ async def safe_callback_answer(callback: CallbackQuery, text: str, *, show_alert
             pass
 
 
+def _compose_subscription_caption(sub: str, body: str, template: str) -> str:
+    """Avoid duplicate subscription URLs when an editable template renders one."""
+    body_has_sub = ('{sub_link}' in str(template or '')) or (str(sub) in html.unescape(str(body or '')))
+    return str(body or '') if body_has_sub else f'🔗 {copy_html(sub)}\n\n{body}'
+
+
 async def send_subscription_delivery(message: Message, service: dict, sub_url: str | None = None, title: str | None = None, invoice_text: str | None = None) -> None:
     """Deliver subscription as exactly one QR photo with the subscription in caption.
 
@@ -169,8 +175,11 @@ async def send_subscription_delivery(message: Message, service: dict, sub_url: s
     default_body = f'{title or "✅ سرویس آماده شد"}\n👤 نام سرویس: {{service_name}}'
     template = str(db.get_setting('service_ready_text', default_body) or default_body)
     body = await render_template_html(message.bot, template, context)
-    # Never move this line below the editable body: the user must always see/copy it first.
-    caption = f'🔗 {copy_html(sub)}\n\n{body}'
+    # If the admin's editable delivery template already renders the subscription
+    # URL (for example via {sub_link}), do not prepend the built-in URL again.
+    # This is especially visible for test services where a customized template
+    # used to produce two identical subscription links in the same caption.
+    caption = _compose_subscription_caption(str(sub), body, template)
     if invoice_text:
         caption += f'\n\n{invoice_text}'
     # Render premium/custom emoji tokens stored by the admin editor before sending the caption.
@@ -1694,13 +1703,24 @@ async def service_import_finish(message: Message, state: FSMContext):
         # Resolve first, then verify local bot ownership BEFORE changing the
         # panel owner. This prevents importing a service already registered to
         # another Telegram customer.
+        submitted_uuids = await api_client.submitted_access_uuids(raw)
         user_data = await api_client.resolve_panel_user_from_access_input(raw)
         username = str(user_data.get('username') or '').strip()
         if not username:
             raise LookupError('service_username_missing')
+
+        # Protect BOTH identity forms before touching panel ownership. A bot-created
+        # service (including test services) may later be renamed in the panel, so a
+        # username-only check is not enough. If any submitted proxy UUID is already
+        # attached to another Telegram user, importing it is rejected.
         local_owner = db.active_service_owner_for_panel_username(username)
         if local_owner is not None and local_owner != uid:
             raise LookupError('service_registered_to_other_user')
+        for proxy_uuid in submitted_uuids:
+            uuid_owner = db.active_service_owner_for_proxy_uuid(proxy_uuid)
+            if uuid_owner is not None and uuid_owner != uid:
+                raise LookupError('service_registered_to_other_user')
+
         user_data = await api_client.ensure_panel_user_owned_by_bot(user_data)
 
         links, fresh_user, sub_url = await api_client.get_user_config_links(username)

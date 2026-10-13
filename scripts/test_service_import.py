@@ -99,6 +99,21 @@ def test_db_adoption() -> None:
     assert original and original['order_id'] == 77
     assert db.get_user_service(service_id, 2002) is None
 
+    # Even if the panel username changed, the same proxy UUID still belongs to
+    # the original Telegram user and must not be adoptable by another user.
+    try:
+        db.adopt_panel_service(
+            2002,
+            'renamed_service',
+            {'username': 'renamed_service', 'status': 'active'},
+            subscription_url='https://sub.example/renamed_service',
+            links=[vless],
+        )
+    except LookupError as exc:
+        assert str(exc) == 'service_registered_to_other_user'
+    else:
+        raise AssertionError('same UUID under a different username must be rejected')
+
 
 def main() -> None:
     asyncio.run(test_panel_uuid_lookup_and_owner_transfer())

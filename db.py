@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import html
+import re
 import sqlite3
 import time as _time
 from datetime import datetime, timedelta
@@ -1335,6 +1336,51 @@ def transfer_user_service(service_id: int, old_owner: int, new_owner: int) -> No
     )
 
 
+_SERVICE_UUID_RE = re.compile(
+    r'(?i)(?<![0-9a-f])([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?![0-9a-f])'
+)
+
+
+def _service_row_uuids(row: sqlite3.Row | dict[str, Any]) -> set[str]:
+    """Extract proxy UUIDs persisted with a local service snapshot."""
+    found: set[str] = set()
+    for key in ('raw_json', 'links_json', 'subscription_url'):
+        try:
+            value = row[key]
+        except Exception:
+            value = None
+        if not value:
+            continue
+        for match in _SERVICE_UUID_RE.finditer(str(value)):
+            found.add(match.group(1).lower())
+    return found
+
+
+def active_service_owner_for_proxy_uuid(proxy_uuid: str) -> int | None:
+    """Return the Telegram owner of an active service containing this proxy UUID.
+
+    This protects bot-created and test services even when their panel username was
+    later changed. ``-1`` means conflicting active local owners exist.
+    """
+    target = str(proxy_uuid or '').strip().lower()
+    if not target or not _SERVICE_UUID_RE.fullmatch(target):
+        return None
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT telegram_id, raw_json, links_json, subscription_url
+               FROM user_services WHERE is_active=1"""
+        ).fetchall()
+    owners: set[int] = set()
+    for row in rows:
+        if target in _service_row_uuids(row) and row['telegram_id'] is not None:
+            owners.add(int(row['telegram_id']))
+    if not owners:
+        return None
+    if len(owners) > 1:
+        return -1
+    return next(iter(owners))
+
+
 def active_service_owner_for_panel_username(service_username: str) -> int | None:
     """Return the Telegram owner of an active local service, if registered."""
     username = str(service_username or '').strip()
@@ -1398,6 +1444,25 @@ def adopt_panel_service(
         active_owners = {int(row['telegram_id']) for row in rows if row['telegram_id'] is not None}
         if any(owner != uid for owner in active_owners):
             raise LookupError('service_registered_to_other_user')
+
+        # Atomic UUID ownership guard. This closes the race between the pre-check in
+        # customer.import_service and this write, and also protects bot-created/test
+        # services if their panel username no longer matches the locally stored name.
+        incoming_uuids = _service_row_uuids({
+            'raw_json': raw_json,
+            'links_json': links_json,
+            'subscription_url': subscription_url or '',
+        })
+        if incoming_uuids:
+            uuid_rows = conn.execute(
+                '''SELECT telegram_id, raw_json, links_json, subscription_url
+                   FROM user_services WHERE is_active=1'''
+            ).fetchall()
+            for existing_row in uuid_rows:
+                if existing_row['telegram_id'] is None or int(existing_row['telegram_id']) == uid:
+                    continue
+                if incoming_uuids.intersection(_service_row_uuids(existing_row)):
+                    raise LookupError('service_registered_to_other_user')
         previous_owner = int(primary['telegram_id']) if primary and primary['telegram_id'] is not None else None
         if primary:
             service_id = int(primary['id'])

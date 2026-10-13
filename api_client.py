@@ -661,6 +661,15 @@ def extract_access_uuids(value: Any) -> set[str]:
     return {m.group(1).lower() for m in UUID_RE.finditer(text)}
 
 
+async def submitted_access_uuids(raw_input: str) -> set[str]:
+    """Public UUID extractor used by import ownership guards.
+
+    For direct configs this extracts UUIDs locally. For subscription URLs it fetches
+    the subscription and extracts UUIDs from the returned configs.
+    """
+    return await _submitted_uuids(raw_input)
+
+
 async def _submitted_uuids(raw_input: str) -> set[str]:
     """Get UUIDs from the message; for a subscription URL, inspect its configs too."""
     raw = str(raw_input or '').strip()

@@ -562,6 +562,254 @@ async def update_user(username: str, payload: dict) -> dict:
     return data
 
 
+async def list_users(*, page_size: int = 200, max_users: int = 10000) -> list[dict]:
+    """Return panel users using bounded pagination.
+
+    Used by the customer-side service import flow to prove which panel user owns
+    a submitted subscription/config. The response is kept in-memory only and is
+    never written to logs because it may contain access credentials.
+    """
+    out: list[dict] = []
+    offset = 0
+    page_size = max(1, min(int(page_size or 200), 1000))
+    max_users = max(1, int(max_users or 10000))
+    while len(out) < max_users:
+        data = await request('GET', '/api/users', params={'offset': offset, 'limit': page_size})
+        if not isinstance(data, dict):
+            break
+        users = data.get('users') or []
+        if not isinstance(users, list):
+            break
+        page = [u for u in users if isinstance(u, dict)]
+        out.extend(page)
+        total = int(data.get('total') or 0)
+        if not page or len(page) < page_size or (total and len(out) >= total):
+            break
+        offset += len(page)
+    return out[:max_users]
+
+
+async def set_user_owner(username: str, admin_username: str) -> dict:
+    """Transfer a panel user's owner to the bot's panel admin account.
+
+    Marzban/PasarGuard exposes this as PUT /api/user/{username}/set-owner with
+    admin_username as a query parameter. The configured panel account must be a
+    sudo/full-access admin for cross-owner adoption.
+    """
+    username = str(username or '').strip()
+    admin_username = str(admin_username or '').strip()
+    if not username or not admin_username:
+        raise ValueError('username/admin_username is empty')
+    data = await request(
+        'PUT',
+        f'/api/user/{username}/set-owner',
+        params={'admin_username': admin_username},
+    )
+    if not isinstance(data, dict):
+        raise RuntimeError('Invalid set-owner response')
+    return data
+
+
+def _owner_username(user_data: dict | None) -> str | None:
+    if not isinstance(user_data, dict):
+        return None
+    for key in ('admin', 'owner', 'owner_admin', 'admin_username', 'owner_username'):
+        value = user_data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            for subkey in ('username', 'name'):
+                v = value.get(subkey)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+    return None
+
+
+def _decode_vmess_payload(link: str) -> dict:
+    raw = str(link or '').strip()
+    if not raw.lower().startswith('vmess://'):
+        return {}
+    payload = raw.split('://', 1)[1].split('#', 1)[0].strip()
+    payload = payload.replace('-', '+').replace('_', '/')
+    payload += '=' * (-len(payload) % 4)
+    try:
+        decoded = base64.b64decode(payload, validate=False).decode('utf-8', errors='ignore')
+        data = json.loads(decoded)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def access_fingerprints(value: str) -> set[str]:
+    """Extract secret-ish identifiers from config/subscription input.
+
+    These values are used only for in-memory matching against the panel user
+    object's `proxies` structure. Fragments/display names and hosts are excluded
+    so a user cannot be matched merely by a cosmetic config name.
+    """
+    result: set[str] = set()
+    links = extract_config_links_from_text(str(value or ''))
+    raw = str(value or '').strip()
+    if not links and _clean_config_link(raw):
+        links = [raw]
+    for link in links:
+        low = link.lower()
+        if low.startswith('vmess://'):
+            data = _decode_vmess_payload(link)
+            for key in ('id', 'uuid'):
+                token = str(data.get(key) or '').strip()
+                if len(token) >= 8:
+                    result.add(token)
+            continue
+        try:
+            parsed = urlparse(link)
+            user = unquote(parsed.username or '').strip()
+            password = unquote(parsed.password or '').strip()
+            if len(user) >= 8:
+                result.add(user)
+            if len(password) >= 8:
+                result.add(password)
+            # Shadowsocks often stores method:password in base64 userinfo.
+            if low.startswith(('ss://', 'ssr://')):
+                auth = link.split('://', 1)[1].split('@', 1)[0].split('#', 1)[0].split('?', 1)[0]
+                decoded = _maybe_decode_base64_text(auth)
+                if decoded:
+                    for part in re.split(r'[:@]', decoded):
+                        part = part.strip()
+                        if len(part) >= 8:
+                            result.add(part)
+        except Exception:
+            continue
+    return result
+
+
+def _proxy_fingerprint_values(value: Any, result: set[str]) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            k = str(key).lower()
+            if isinstance(item, str) and k in {'id', 'uuid', 'password', 'private_key', 'token', 'secret'}:
+                token = item.strip()
+                if len(token) >= 8:
+                    result.add(token)
+            else:
+                _proxy_fingerprint_values(item, result)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _proxy_fingerprint_values(item, result)
+
+
+def user_access_fingerprints(user_data: dict) -> set[str]:
+    result: set[str] = set()
+    if not isinstance(user_data, dict):
+        return result
+    _proxy_fingerprint_values(user_data.get('proxies') or {}, result)
+    return result
+
+
+def _normalized_http_url(value: str | None) -> str:
+    raw = str(value or '').strip().rstrip('/')
+    if not raw.lower().startswith(('http://', 'https://')):
+        return ''
+    try:
+        parsed = urlparse(raw)
+        return parsed._replace(fragment='').geturl().rstrip('/')
+    except Exception:
+        return raw
+
+
+async def resolve_panel_user_from_access_input(raw_input: str) -> dict:
+    """Resolve a submitted subscription URL or single config to one panel user.
+
+    Matching order:
+    1) direct username-looking subscription path candidate;
+    2) exact subscription_url from /api/users;
+    3) config credential fingerprint (UUID/password/etc.) against user proxies.
+
+    Ambiguous matches are rejected instead of adopting the wrong service.
+    """
+    raw = str(raw_input or '').strip()
+    if not raw:
+        raise ValueError('empty service input')
+
+    submitted_url = _normalized_http_url(raw)
+    if submitted_url:
+        try:
+            parsed = urlparse(submitted_url)
+            candidate = unquote((parsed.path or '').rstrip('/').split('/')[-1]).strip()
+            if candidate and re.fullmatch(r'[A-Za-z0-9_.-]{2,128}', candidate):
+                try:
+                    direct = await get_user(candidate)
+                    direct_sub = _normalized_http_url(extract_subscription_url(direct))
+                    # Accept direct username candidates only if the panel itself agrees
+                    # with the submitted URL, or if the base is username-based.
+                    if direct_sub and direct_sub == submitted_url:
+                        return direct
+                    base = str(db.get_setting('subscription_base_url', settings.subscription_base_url) or '')
+                    if '{username}' in base and str(direct.get('username') or '') == candidate:
+                        return direct
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    submitted_fps = access_fingerprints(raw)
+    # A subscription URL may expose configs while the URL token itself is opaque.
+    if submitted_url and not submitted_fps:
+        try:
+            configs = await fetch_subscription_configs(submitted_url)
+            submitted_fps = access_fingerprints('\n'.join(configs))
+        except Exception:
+            submitted_fps = set()
+
+    users = await list_users()
+    matches: dict[str, dict] = {}
+    for item in users:
+        username = str(item.get('username') or '').strip()
+        if not username:
+            continue
+        if submitted_url:
+            candidate_sub = _normalized_http_url(extract_subscription_url(item))
+            if candidate_sub and candidate_sub == submitted_url:
+                matches[username] = item
+                continue
+        if submitted_fps:
+            fps = user_access_fingerprints(item)
+            if fps.intersection(submitted_fps):
+                matches[username] = item
+
+    if not matches:
+        raise LookupError('service_not_found')
+    if len(matches) > 1:
+        raise LookupError('service_match_ambiguous')
+
+    username, summary = next(iter(matches.items()))
+    try:
+        return await get_user(username)
+    except Exception:
+        return summary
+
+
+async def adopt_panel_user_for_bot(raw_input: str) -> dict:
+    """Resolve service and ensure the bot panel admin owns it.
+
+    This gives the configured bot panel account full management access to the
+    service before it is attached to a Telegram customer.
+    """
+    user_data = await resolve_panel_user_from_access_input(raw_input)
+    username = str(user_data.get('username') or '').strip()
+    if not username:
+        raise LookupError('service_username_missing')
+    target_owner = str(settings.panel_admin_username or '').strip()
+    current_owner = _owner_username(user_data)
+    if target_owner and current_owner != target_owner:
+        user_data = await set_user_owner(username, target_owner)
+    elif target_owner and current_owner is None:
+        # Some panel versions omit owner from UserResponse. Calling set-owner is
+        # idempotent and guarantees the bot's full-access admin becomes owner.
+        user_data = await set_user_owner(username, target_owner)
+    return user_data
+
+
 async def revoke_user_subscription(username: str) -> dict:
     try:
         data = await request('POST', f'/api/user/{username}/revoke_sub')

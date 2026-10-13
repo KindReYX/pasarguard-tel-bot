@@ -1335,6 +1335,91 @@ def transfer_user_service(service_id: int, old_owner: int, new_owner: int) -> No
     )
 
 
+def adopt_panel_service(
+    telegram_id: int,
+    service_username: str,
+    user_data: dict[str, Any],
+    *,
+    subscription_url: str | None = None,
+    links: list[str] | None = None,
+    package_id: str | None = None,
+    package_name: str | None = None,
+) -> tuple[int, int | None]:
+    """Attach one existing panel service to a Telegram customer atomically.
+
+    Returns ``(service_id, previous_telegram_owner)``. If the same panel username
+    already exists under another Telegram user, ownership is moved instead of
+    creating a duplicate row. Financial/order history is intentionally not
+    transferred: ``order_id`` is cleared when local ownership changes.
+    """
+    uid = int(telegram_id)
+    username = str(service_username or '').strip()
+    if not username:
+        raise ValueError('service_username is empty')
+    user_data = user_data or {}
+    now = now_iso()
+    status = user_data.get('status')
+    data_limit = int(user_data.get('data_limit') or 0)
+    used_traffic = int(user_data.get('used_traffic') or 0)
+    lifetime_used = int(user_data.get('lifetime_used_traffic') or used_traffic or 0)
+    expire = user_data.get('expire')
+    online_at = user_data.get('online_at') or user_data.get('last_online')
+    client_type = user_data.get('client_type') or user_data.get('last_client') or user_data.get('user_agent')
+    links_json = json.dumps(links or [], ensure_ascii=False)
+    raw_json = json.dumps(user_data, ensure_ascii=False)
+
+    with connect() as conn:
+        rows = conn.execute(
+            '''SELECT * FROM user_services
+               WHERE (panel_username=? OR service_username=?) AND is_active=1
+               ORDER BY updated_at DESC, id DESC''',
+            (username, username),
+        ).fetchall()
+        primary = rows[0] if rows else None
+        previous_owner = int(primary['telegram_id']) if primary and primary['telegram_id'] is not None else None
+        if primary:
+            service_id = int(primary['id'])
+            moved = previous_owner != uid
+            conn.execute(
+                '''UPDATE user_services SET telegram_id=?, order_id=?,
+                   package_id=COALESCE(?, package_id), package_name=COALESCE(?, package_name),
+                   service_username=?, panel_username=?, subscription_url=COALESCE(?, subscription_url),
+                   links_json=?, raw_json=?, status=?, data_limit=?, used_traffic=?, lifetime_used_traffic=?,
+                   expire=?, online_at=?, last_subscription_update=?, client_type=?,
+                   transferred_from=?, transferred_to=?, updated_at=?, is_active=1
+                   WHERE id=?''',
+                (
+                    uid, None if moved else primary['order_id'], package_id, package_name,
+                    username, username, subscription_url, links_json, raw_json, status,
+                    data_limit, used_traffic, lifetime_used, expire, online_at, now, client_type,
+                    previous_owner if moved else primary['transferred_from'],
+                    uid if moved else primary['transferred_to'], now, service_id,
+                ),
+            )
+            # Any duplicate active rows for the same panel username are retired.
+            for duplicate in rows[1:]:
+                conn.execute(
+                    'UPDATE user_services SET is_active=0, status=?, updated_at=? WHERE id=?',
+                    ('duplicate_adopted', now, int(duplicate['id'])),
+                )
+        else:
+            cur = conn.execute(
+                '''INSERT INTO user_services (
+                    telegram_id, order_id, package_id, package_name, service_username, panel_username,
+                    subscription_url, links_json, raw_json, status, data_limit, used_traffic, lifetime_used_traffic,
+                    expire, online_at, last_subscription_update, client_type, created_at, updated_at, is_active
+                ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)''',
+                (
+                    uid, package_id, package_name or 'سرویس واردشده', username, username, subscription_url, links_json, raw_json, status,
+                    data_limit, used_traffic, lifetime_used, expire, online_at, now, client_type, now, now,
+                ),
+            )
+            service_id = int(cur.lastrowid)
+            previous_owner = None
+        conn.commit()
+        return service_id, previous_owner
+
+
 def deactivate_user_service(service_id: int, owner_id: int, status: str = 'deleted_by_customer') -> None:
     execute(
         '''UPDATE user_services SET is_active=0, status=?, updated_at=?

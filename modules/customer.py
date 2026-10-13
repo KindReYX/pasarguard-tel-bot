@@ -89,6 +89,10 @@ class CustomerWalletState(StatesGroup):
     waiting_charge_amount = State()
 
 
+class CustomerImportServiceState(StatesGroup):
+    waiting_access = State()
+
+
 def copy_code(value: Any) -> str:
     text = str(value if value is not None else '-')
     return '`' + text.replace('`', '') + '`'
@@ -567,6 +571,7 @@ def services_list_keyboard(services: list[dict]) -> InlineKeyboardMarkup:
                 callback_data=f"cust_service:{service['id']}",
             )
         ])
+    rows.append([InlineKeyboardButton(text='➕ اضافه کردن کانفیگ', callback_data='cust_service_import')])
     rows.append([InlineKeyboardButton(text='🔙 بازگشت به منوی اصلی', callback_data='cust_cancel')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1645,21 +1650,116 @@ async def customer_successful_payment(message: Message):
 async def my_services_message(message: Message):
     user_id = message.from_user.id if message.from_user else None
     services = db.user_services(user_id)
-    if not services:
-        await message.answer('شما هنوز سرویسی ندارید.', reply_markup=customer_keyboard())
-        return
-    await message.answer('👤 سرویس های من\n\nیک سرویس را انتخاب کنید:', reply_markup=services_list_keyboard(services))
+    text = '👤 سرویس های من\n\nیک سرویس را انتخاب کنید:' if services else '👤 سرویس های من\n\nهنوز سرویسی اضافه نکرده‌اید. اگر از قبل کانفیگ یا لینک اشتراک دارید، از دکمه پایین استفاده کنید.'
+    await message.answer(text, reply_markup=services_list_keyboard(services))
 
 
 @customer_router.callback_query(F.data == 'cust_services')
-async def my_services_callback(callback: CallbackQuery):
+async def my_services_callback(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
     services = db.user_services(callback.from_user.id)
-    if not services:
-        await edit_or_answer(callback, 'شما هنوز سرویسی ندارید.')
-        await callback.answer()
-        return
-    await edit_or_answer(callback, '👤 سرویس های من\n\nیک سرویس را انتخاب کنید:', reply_markup=services_list_keyboard(services))
+    text = '👤 سرویس های من\n\nیک سرویس را انتخاب کنید:' if services else '👤 سرویس های من\n\nهنوز سرویسی اضافه نکرده‌اید. اگر از قبل کانفیگ یا لینک اشتراک دارید، از دکمه پایین استفاده کنید.'
+    await edit_or_answer(callback, text, reply_markup=services_list_keyboard(services))
     await callback.answer()
+
+
+@customer_router.callback_query(F.data == 'cust_service_import')
+async def service_import_start(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.set_state(CustomerImportServiceState.waiting_access)
+    await edit_or_answer(
+        callback,
+        '➕ اضافه کردن کانفیگ\n\nیکی از موارد زیر را ارسال کنید:\n• لینک Subscription سرویس\n• یک کانفیگ VLESS / VMess / Trojan / Shadowsocks و ...\n\nربات سرویس متناظر را در پنل پیدا می‌کند و آن را به حساب شما متصل می‌کند.\n\n⚠️ فقط اطلاعات دسترسی همان سرویس را ارسال کنید.',
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ انصراف', callback_data='cust_services')]]),
+    )
+    await callback.answer()
+
+
+@customer_router.message(CustomerImportServiceState.waiting_access)
+async def service_import_finish(message: Message, state: FSMContext):
+    uid = message.from_user.id if message.from_user else None
+    raw = (message.text or message.caption or '').strip()
+    if not uid:
+        await state.clear()
+        return
+    if not raw:
+        await message.answer('لینک ساب یا یک کانفیگ را به صورت متن ارسال کنید.')
+        return
+    if len(raw) > 12000:
+        await message.answer('ورودی خیلی طولانی است. فقط یک لینک ساب یا یک کانفیگ ارسال کنید.')
+        return
+
+    wait = await message.answer('⏳ در حال پیدا کردن سرویس و بررسی مالکیت...')
+    try:
+        user_data = await api_client.adopt_panel_user_for_bot(raw)
+        username = str(user_data.get('username') or '').strip()
+        if not username:
+            raise LookupError('service_username_missing')
+
+        links, fresh_user, sub_url = await api_client.get_user_config_links(username)
+        if fresh_user:
+            user_data = fresh_user
+        sub_url = sub_url or api_client.extract_subscription_url(user_data)
+        if not links:
+            links = api_client.extract_config_links(user_data)
+            if not links and sub_url:
+                try:
+                    links = await api_client.fetch_subscription_configs(sub_url)
+                except Exception:
+                    links = []
+
+        service_id, previous_owner = db.adopt_panel_service(
+            uid,
+            username,
+            user_data,
+            subscription_url=sub_url,
+            links=links,
+            package_id=None,
+            package_name=None,
+        )
+        db.add_log(
+            uid,
+            'customer_import_service',
+            'service',
+            str(service_id),
+            {'panel_username': username, 'previous_telegram_owner': previous_owner, 'owner_admin': settings.panel_admin_username},
+        )
+        await state.clear()
+        try:
+            await wait.delete()
+        except Exception:
+            pass
+        service = db.get_user_service(service_id, uid) or {}
+        await message.answer(
+            f'✅ سرویس با موفقیت به حساب شما اضافه شد.\n\nنام سرویس: {copy_code(username)}\nاز این به بعد از بخش «سرویس‌های من» قابل مدیریت و تمدید است.',
+            reply_markup=service_detail_keyboard(service_id, _service_detail_context(service, user_data)),
+            parse_mode='Markdown',
+        )
+    except LookupError as exc:
+        code = str(exc)
+        if code == 'service_match_ambiguous':
+            text = 'چند سرویس با این اطلاعات تطبیق داشت و برای جلوگیری از انتقال اشتباه، چیزی تغییر نکرد. لطفاً لینک Subscription کامل همان سرویس را ارسال کنید.'
+        else:
+            text = 'سرویس متناظر در پنل پیدا نشد. لینک Subscription کامل یا یک کانفیگ معتبر از همان سرویس را ارسال کنید.'
+        try:
+            await wait.edit_text('❌ ' + text)
+        except Exception:
+            await message.answer('❌ ' + text)
+    except Exception as exc:
+        db.record_system_error(
+            'customer.import_service',
+            str(exc),
+            user_id=uid,
+            entity_type='service_import',
+            entity_id='-',
+            error_type=type(exc).__name__,
+            details={'diagnosis': db.diagnose_system_error(str(exc), type(exc).__name__, 'customer.import_service')},
+        )
+        friendly = friendly_error(exc)
+        try:
+            await wait.edit_text(f'❌ اضافه کردن سرویس انجام نشد.\n\n{friendly}')
+        except Exception:
+            await message.answer(f'❌ اضافه کردن سرویس انجام نشد.\n\n{friendly}')
 
 
 @customer_router.callback_query(F.data.startswith('cust_service:'))

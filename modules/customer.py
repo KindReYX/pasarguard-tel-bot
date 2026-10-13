@@ -29,7 +29,7 @@ from keyboards import (
     customer_keyboard,
     customer_menu_title,
 )
-from utils import answer_template, edit_or_answer, friendly_error, user_template_context, render_template_html, render_custom_emoji_output, render_template_text
+from utils import answer_template, edit_or_answer, friendly_error, user_template_context, render_template_html, render_custom_emoji_output, render_template_text, expand_template_context
 import modules.payment_engine as payment_engine
 from modules import edit_runtime
 from modules.qr_tools import send_qr_photo, make_qr_file
@@ -784,9 +784,7 @@ def username_rules_text(pack: dict, meta: dict, user: Any = None) -> tuple[str, 
             user,
             support=str(db.get_setting('support_username', settings.support_username) or ''),
         ))
-    rendered = template
-    for key, value in context.items():
-        rendered = rendered.replace('{' + key + '}', str(value))
+    rendered = render_template_text(template, context)
     return rendered, template, context
 
 
@@ -924,15 +922,13 @@ def _service_detail_context(service: dict, user_data: dict | None = None, sub_ur
     return context
 
 def _render_service_detail_plain(template: str, context: dict[str, str]) -> str:
-    text = str(template or SERVICE_DETAIL_TEXT_DEFAULT)
-    for key, value in context.items():
-        text = text.replace('{' + key + '}', str(value))
-    return text
+    return render_template_text(str(template or SERVICE_DETAIL_TEXT_DEFAULT), context)
 
 def _render_service_detail_html(template: str, context: dict[str, str]) -> str:
     # Escape admin text first, then insert variables safely. Copy-sensitive values
     # stay inside <code> so the subscription link and identifiers remain easy to copy.
     text = html.escape(str(template or SERVICE_DETAIL_TEXT_DEFAULT))
+    context = expand_template_context(context)
     for key, value in context.items():
         safe = html.escape(str(value))
         if key in SERVICE_DETAIL_COPY_VARS:
@@ -946,6 +942,7 @@ def _render_service_detail_html(template: str, context: dict[str, str]) -> str:
         r'<tg-emoji emoji-id="\\1">⭐</tg-emoji>',
         text,
     )
+    text = re.sub(r'\{[A-Za-z_][A-Za-z0-9_]*\}', '-', text)
     return text
 
 def build_service_detail_text(service: dict, user_data: dict | None = None) -> str:

@@ -19,7 +19,7 @@ from modules import edit_runtime
 from keyboards import EditableButtonFilter
 from keyboards import BTN_CARD_RECEIPTS, customer_keyboard
 from permissions import is_super_admin
-from utils import render_template_html, user_template_context, person_display, get_button_style, RETRYABLE_NETWORK_EXCEPTIONS
+from utils import render_template_html, render_template_text, user_template_context, person_display, get_button_style, RETRYABLE_NETWORK_EXCEPTIONS
 
 card_transfer_router = Router()
 
@@ -482,9 +482,7 @@ async def _start_receipt_flow(callback: CallbackQuery, state: FSMContext, *, kin
         'price_raw': int(amount),
         'payment_kind': kind,
     }
-    prompt_text = prompt_template
-    for key, value in prompt_context.items():
-        prompt_text = prompt_text.replace('{' + key + '}', str(value))
+    prompt_text = render_template_text(prompt_template, prompt_context)
     with edit_runtime.text_hint(
         setting_key='card_receipt_upload_prompt_text',
         template=prompt_template,
@@ -638,9 +636,7 @@ async def receive_receipt(message: Message, state: FSMContext):
             'price_raw': int(amount),
             'payment_kind': kind,
         }
-        submitted_text = submitted_template
-        for key, value in submitted_context.items():
-            submitted_text = submitted_text.replace('{' + key + '}', str(value))
+        submitted_text = render_template_text(submitted_template, submitted_context)
         with edit_runtime.text_hint(
             setting_key='card_receipt_submitted_text',
             template=submitted_template,

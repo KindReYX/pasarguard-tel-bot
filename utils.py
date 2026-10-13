@@ -432,13 +432,54 @@ def format_display_prices(text: str | None) -> str:
     return raw
 
 
+_UNRESOLVED_TEMPLATE_VAR_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def expand_template_context(context: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Add compatibility aliases used by editable texts across the bot.
+
+    Older/custom templates may use a legacy variable name while the caller provides
+    the modern equivalent. Keeping the aliases here gives every renderer the same
+    behavior instead of fixing individual screens one by one.
+    """
+    ctx = dict(context or {})
+
+    alias_groups = (
+        ('order_id', 'entity_id'),
+        ('service_name', 'service_username', 'customer_username', 'panel_username'),
+        ('status', 'final_status'),
+        ('sub_link', 'subscription_url'),
+        ('ref_link', 'referral_link'),
+    )
+    for group in alias_groups:
+        value = None
+        for key in group:
+            if key in ctx and ctx.get(key) not in (None, ''):
+                value = ctx.get(key)
+                break
+        if value is not None:
+            for key in group:
+                ctx.setdefault(key, value)
+    return ctx
+
+
+def _hide_unresolved_template_vars(text: str) -> str:
+    """Never leak raw {variable} tokens to customers.
+
+    A missing context value should render as '-' rather than exposing an internal
+    template token. This is a final safety net; callers should still provide real
+    values whenever they exist.
+    """
+    return _UNRESOLVED_TEMPLATE_VAR_RE.sub('-', str(text or ''))
+
+
 def render_template_text(template: str | None, context: dict[str, Any] | None = None) -> str:
     """Plain-text template renderer kept for non-HTML use."""
     text = str(template or '')
-    context = context or {}
+    context = expand_template_context(context)
     for key, value in context.items():
         text = text.replace('{' + str(key) + '}', display_template_value(str(key), value))
-    return text
+    return _hide_unresolved_template_vars(text)
 
 
 def user_template_context(user: Any = None, *, support: str = '') -> dict[str, Any]:
@@ -479,7 +520,7 @@ async def render_template_html(bot: Bot | None, template: str | None, context: d
     The custom emoji's real fallback emoji is resolved through Telegram when possible.
     """
     raw = str(template or '')
-    context = context or {}
+    context = expand_template_context(context)
 
     # Protect custom emoji tokens before escaping the admin supplied text.
     ids = []
@@ -518,6 +559,8 @@ async def render_template_html(bot: Bot | None, template: str | None, context: d
     for idx, emoji_id in enumerate(ids):
         tag = f'<tg-emoji emoji-id="{emoji_id}">{html.escape(alts[idx])}</tg-emoji>'
         rendered = rendered.replace(f'\x00CUSTOM_EMOJI_{idx}\x00', tag)
+
+    rendered = _hide_unresolved_template_vars(rendered)
     return rendered
 
 

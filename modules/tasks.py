@@ -258,6 +258,11 @@ async def _send_expire_warning(bot: Bot, service: dict, seconds: int, expire: in
         'username': ('@' + str(user.get('username'))) if user.get('username') else '',
         'user_id': uid,
         'service_name': service_name,
+        'service_username': str(service.get('service_username') or service_name),
+        'panel_username': str(service.get('panel_username') or service_name),
+        'service_id': int(service.get('id') or 0),
+        'order_id': str(service.get('order_id') or '-'),
+        'entity_id': str(service.get('order_id') or '-'),
         'package_name': package_name,
         'package_id': str(service.get('package_id') or ''),
         'days': days,
@@ -280,7 +285,7 @@ async def service_warning_loop(bot: Bot) -> None:
             # Stream only active services that need attention: expire in next 3 days OR traffic > 70%
             # Avoid SELECT * on potentially large table; fetch only needed columns and batch.
             rows = db.fetchall('''
-                SELECT id, telegram_id, package_id, package_name, service_username, panel_username, expire, data_limit, used_traffic
+                SELECT id, telegram_id, order_id, package_id, package_name, service_username, panel_username, expire, data_limit, used_traffic
                 FROM user_services
                 WHERE is_active=1 AND (
                     (expire IS NOT NULL AND expire != '' AND CAST(expire AS INTEGER) > 0)
@@ -339,10 +344,19 @@ async def test_service_reminder_loop(bot: Bot) -> None:
                         if not uid:
                             continue
                         user = db.fetchone('SELECT * FROM bot_users WHERE telegram_id=?', (uid,)) or {}
-                        service = db.fetchone('SELECT package_id, package_name FROM user_services WHERE id=?', (int(row.get('service_id') or 0),)) if row.get('service_id') else None
+                        service = db.fetchone('SELECT id, order_id, package_id, package_name, service_username, panel_username, subscription_url, expire, data_limit, used_traffic FROM user_services WHERE id=?', (int(row.get('service_id') or 0),)) if row.get('service_id') else None
                         context = db.product_context_for_template((service or {}).get('package_id'))
                         context.update({
                             'package_name': str((service or {}).get('package_name') or 'نامشخص'),
+                            'package_id': str((service or {}).get('package_id') or ''),
+                            'service_id': int((service or {}).get('id') or 0),
+                            'order_id': str((service or {}).get('order_id') or '-'),
+                            'entity_id': str((service or {}).get('order_id') or '-'),
+                            'service_name': str((service or {}).get('service_username') or (service or {}).get('panel_username') or '-'),
+                            'service_username': str((service or {}).get('service_username') or ''),
+                            'panel_username': str((service or {}).get('panel_username') or ''),
+                            'sub_link': str((service or {}).get('subscription_url') or ''),
+                            'subscription_url': str((service or {}).get('subscription_url') or ''),
                             'name': str(user.get('first_name') or user.get('username') or uid),
                             'first_name': str(user.get('first_name') or ''),
                             'username': ('@' + str(user.get('username'))) if user.get('username') else '',

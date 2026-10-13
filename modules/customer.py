@@ -1669,7 +1669,7 @@ async def service_import_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(CustomerImportServiceState.waiting_access)
     await edit_or_answer(
         callback,
-        '➕ اضافه کردن کانفیگ\n\nیکی از موارد زیر را ارسال کنید:\n• لینک Subscription سرویس\n• یک کانفیگ VLESS / VMess / Trojan / Shadowsocks و ...\n\nربات سرویس متناظر را در پنل پیدا می‌کند و آن را به حساب شما متصل می‌کند.\n\n⚠️ فقط اطلاعات دسترسی همان سرویس را ارسال کنید.',
+        '➕ اضافه کردن کانفیگ\n\nیک کانفیگ دارای UUID یا لینک Subscription همان سرویس را ارسال کنید.\n\nربات فقط UUID را استخراج می‌کند و سرویس دارای همان UUID را در پنل پیدا می‌کند.',
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ انصراف', callback_data='cust_services')]]),
     )
     await callback.answer()
@@ -1738,9 +1738,11 @@ async def service_import_finish(message: Message, state: FSMContext):
     except LookupError as exc:
         code = str(exc)
         if code == 'service_match_ambiguous':
-            text = 'چند سرویس با این اطلاعات تطبیق داشت و برای جلوگیری از انتقال اشتباه، چیزی تغییر نکرد. لطفاً لینک Subscription کامل همان سرویس را ارسال کنید.'
+            text = 'این UUID روی بیش از یک سرویس پیدا شد و برای جلوگیری از انتقال اشتباه چیزی تغییر نکرد.'
+        elif code == 'service_uuid_missing':
+            text = 'هیچ UUID معتبری در ورودی پیدا نشد. یک کانفیگ دارای UUID یا لینک Subscription همان سرویس را ارسال کنید.'
         else:
-            text = 'سرویس متناظر در پنل پیدا نشد. لینک Subscription کامل یا یک کانفیگ معتبر از همان سرویس را ارسال کنید.'
+            text = 'هیچ سرویسی با این UUID در پنل پیدا نشد.'
         try:
             await wait.edit_text('❌ ' + text)
         except Exception:

@@ -640,153 +640,86 @@ def _decode_vmess_payload(link: str) -> dict:
         return {}
 
 
-def access_fingerprints(value: str) -> set[str]:
-    """Extract secret-ish identifiers from config/subscription input.
-
-    These values are used only for in-memory matching against the panel user
-    object's `proxies` structure. Fragments/display names and hosts are excluded
-    so a user cannot be matched merely by a cosmetic config name.
-    """
-    result: set[str] = set()
-    links = extract_config_links_from_text(str(value or ''))
-    raw = str(value or '').strip()
-    if not links and _clean_config_link(raw):
-        links = [raw]
-    for link in links:
-        low = link.lower()
-        if low.startswith('vmess://'):
-            data = _decode_vmess_payload(link)
-            for key in ('id', 'uuid'):
-                token = str(data.get(key) or '').strip()
-                if len(token) >= 8:
-                    result.add(token)
-            continue
-        try:
-            parsed = urlparse(link)
-            user = unquote(parsed.username or '').strip()
-            password = unquote(parsed.password or '').strip()
-            if len(user) >= 8:
-                result.add(user)
-            if len(password) >= 8:
-                result.add(password)
-            # Shadowsocks often stores method:password in base64 userinfo.
-            if low.startswith(('ss://', 'ssr://')):
-                auth = link.split('://', 1)[1].split('@', 1)[0].split('#', 1)[0].split('?', 1)[0]
-                decoded = _maybe_decode_base64_text(auth)
-                if decoded:
-                    for part in re.split(r'[:@]', decoded):
-                        part = part.strip()
-                        if len(part) >= 8:
-                            result.add(part)
-        except Exception:
-            continue
-    return result
+UUID_RE = re.compile(r"(?i)(?<![0-9a-f])([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?![0-9a-f])")
 
 
-def _proxy_fingerprint_values(value: Any, result: set[str]) -> None:
+def extract_access_uuids(value: Any) -> set[str]:
+    """Extract canonical UUIDs from arbitrary submitted text or panel payload."""
+    if value is None:
+        return set()
     if isinstance(value, dict):
-        for key, item in value.items():
-            k = str(key).lower()
-            if isinstance(item, str) and k in {'id', 'uuid', 'password', 'private_key', 'token', 'secret'}:
-                token = item.strip()
-                if len(token) >= 8:
-                    result.add(token)
-            else:
-                _proxy_fingerprint_values(item, result)
-    elif isinstance(value, (list, tuple)):
+        out: set[str] = set()
+        for item in value.values():
+            out.update(extract_access_uuids(item))
+        return out
+    if isinstance(value, (list, tuple, set)):
+        out: set[str] = set()
         for item in value:
-            _proxy_fingerprint_values(item, result)
+            out.update(extract_access_uuids(item))
+        return out
+    text = str(value)
+    return {m.group(1).lower() for m in UUID_RE.finditer(text)}
 
 
-def user_access_fingerprints(user_data: dict) -> set[str]:
-    result: set[str] = set()
-    if not isinstance(user_data, dict):
-        return result
-    _proxy_fingerprint_values(user_data.get('proxies') or {}, result)
-    return result
-
-
-def _normalized_http_url(value: str | None) -> str:
-    raw = str(value or '').strip().rstrip('/')
-    if not raw.lower().startswith(('http://', 'https://')):
-        return ''
-    try:
-        parsed = urlparse(raw)
-        return parsed._replace(fragment='').geturl().rstrip('/')
-    except Exception:
-        return raw
+async def _submitted_uuids(raw_input: str) -> set[str]:
+    """Get UUIDs from the message; for a subscription URL, inspect its configs too."""
+    raw = str(raw_input or '').strip()
+    found = extract_access_uuids(raw)
+    if found:
+        return found
+    if raw.lower().startswith(('http://', 'https://')):
+        try:
+            configs = await fetch_subscription_configs(raw)
+            for config in configs:
+                found.update(extract_access_uuids(config))
+        except Exception:
+            pass
+    return found
 
 
 async def resolve_panel_user_from_access_input(raw_input: str) -> dict:
-    """Resolve a submitted subscription URL or single config to one panel user.
+    """Resolve a service strictly by UUID.
 
-    Matching order:
-    1) direct username-looking subscription path candidate;
-    2) exact subscription_url from /api/users;
-    3) config credential fingerprint (UUID/password/etc.) against user proxies.
-
-    Ambiguous matches are rejected instead of adopting the wrong service.
+    The submitted config/subscription is used only to obtain one or more UUIDs.
+    Panel usernames, domains, subscription paths, fragments and display names are
+    intentionally ignored. Each panel user is fetched in detail before matching
+    because /api/users summaries may omit proxy UUIDs.
     """
     raw = str(raw_input or '').strip()
     if not raw:
         raise ValueError('empty service input')
 
-    submitted_url = _normalized_http_url(raw)
-    if submitted_url:
-        try:
-            parsed = urlparse(submitted_url)
-            candidate = unquote((parsed.path or '').rstrip('/').split('/')[-1]).strip()
-            if candidate and re.fullmatch(r'[A-Za-z0-9_.-]{2,128}', candidate):
-                try:
-                    direct = await get_user(candidate)
-                    direct_sub = _normalized_http_url(extract_subscription_url(direct))
-                    # Accept direct username candidates only if the panel itself agrees
-                    # with the submitted URL, or if the base is username-based.
-                    if direct_sub and direct_sub == submitted_url:
-                        return direct
-                    base = str(db.get_setting('subscription_base_url', settings.subscription_base_url) or '')
-                    if '{username}' in base and str(direct.get('username') or '') == candidate:
-                        return direct
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    submitted_fps = access_fingerprints(raw)
-    # A subscription URL may expose configs while the URL token itself is opaque.
-    if submitted_url and not submitted_fps:
-        try:
-            configs = await fetch_subscription_configs(submitted_url)
-            submitted_fps = access_fingerprints('\n'.join(configs))
-        except Exception:
-            submitted_fps = set()
+    submitted_uuids = await _submitted_uuids(raw)
+    if not submitted_uuids:
+        raise LookupError('service_uuid_missing')
 
     users = await list_users()
     matches: dict[str, dict] = {}
-    for item in users:
-        username = str(item.get('username') or '').strip()
+    for summary in users:
+        username = str(summary.get('username') or '').strip()
         if not username:
             continue
-        if submitted_url:
-            candidate_sub = _normalized_http_url(extract_subscription_url(item))
-            if candidate_sub and candidate_sub == submitted_url:
-                matches[username] = item
-                continue
-        if submitted_fps:
-            fps = user_access_fingerprints(item)
-            if fps.intersection(submitted_fps):
-                matches[username] = item
+
+        # Fast path in case this panel includes proxy data in list responses.
+        if extract_access_uuids(summary).intersection(submitted_uuids):
+            matches[username] = summary
+            continue
+
+        # Most Marzban/PasarGuard variants omit proxy details from /api/users.
+        # Fetch the full user object so UUID matching actually sees proxy UUIDs.
+        try:
+            detail = await get_user(username)
+        except Exception:
+            continue
+        if extract_access_uuids(detail).intersection(submitted_uuids):
+            matches[username] = detail
 
     if not matches:
         raise LookupError('service_not_found')
     if len(matches) > 1:
         raise LookupError('service_match_ambiguous')
 
-    username, summary = next(iter(matches.items()))
-    try:
-        return await get_user(username)
-    except Exception:
-        return summary
+    return next(iter(matches.values()))
 
 
 async def adopt_panel_user_for_bot(raw_input: str) -> dict:

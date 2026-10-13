@@ -15,6 +15,7 @@ from keyboards import BTN_ADVANCED_SETTINGS, back_keyboard
 from permissions import deny_callback, deny_message, is_super_admin
 from utils import answer_callback, edit_or_answer, get_content_stickers, set_content_stickers, BUTTON_DETAIL_GROUPS, get_button_detail_override, set_button_detail_style, message_text_with_custom_emoji_tokens, truncate_custom_emoji_text
 from modules.qr_tools import make_qr_file, background_available
+from modules import edit_runtime
 
 advanced_router = Router()
 
@@ -379,14 +380,17 @@ async def advanced_public_package_buttons(callback: CallbackQuery):
     if not is_super_admin(callback.from_user.id):
         await deny_callback(callback); return
     template = str(db.get_setting('customer_pack_button_template', '📦 {package_name} | {price}') or '📦 {package_name} | {price}')
-    await edit_or_answer(
-        callback,
-        '📦 دکمه‌های بسته‌های خرید\n\n'
-        f'قالب عمومی فعلی:\n{template}\n\n'
-        'متغیرها: {package_name} {name} {package_id} {template_id} {volume_gb} {traffic_gb} {gb} {price} {price_toman} {price_raw} {duration_days} {days} {duration_months} {product_name} {product_id}\n\n'
-        'قالب اختصاصی هر بسته از داخل همان بسته قابل تنظیم است.',
-        reply_markup=package_buttons_admin_keyboard(),
-    )
+    # This is a template-management page. Bypass generic Live Edit so literal
+    # {package_*} placeholders are never rendered/replaced with '-' on the admin screen.
+    with edit_runtime.output_passthrough():
+        await edit_or_answer(
+            callback,
+            '📦 دکمه‌های بسته‌های خرید\n\n'
+            f'قالب عمومی فعلی:\n{template}\n\n'
+            'متغیرها: {package_name} {name} {package_id} {template_id} {volume_gb} {traffic_gb} {data_gb} {gb} {price} {price_toman} {price_raw} {duration_days} {days} {duration_months} {product_name} {product_id}\n\n'
+            'قالب اختصاصی هر بسته از داخل همان بسته قابل تنظیم است.',
+            reply_markup=package_buttons_admin_keyboard(),
+        )
     await answer_callback(callback)
 
 
@@ -650,6 +654,20 @@ async def advanced_edit_start(callback: CallbackQuery, state: FSMContext):
         return
     await state.set_state(AdvancedState.edit_value)
     await state.update_data(advanced_key=key)
+    if key == 'customer_pack_button_template':
+        current = str(db.get_setting(item.key, item.default) or item.default)
+        with edit_runtime.output_passthrough():
+            await edit_or_answer(
+                callback,
+                '✏️ قالب عمومی دکمه بسته‌های خرید\n\n'
+                'قالب را با همین متغیرها بفرستید. Premium Emoji هم پشتیبانی می‌شود.\n'
+                'متغیرها: {package_name} {name} {package_id} {template_id} {volume_gb} {traffic_gb} {data_gb} {gb} {price} {price_toman} {price_raw} {duration_days} {days} {duration_months} {product_name} {product_id}\n\n'
+                'پیام بعدی قالب فعلی است؛ آن را Copy و ویرایش کنید.',
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ لغو', callback_data='adv:public:packages')]]),
+            )
+            await callback.message.answer(current or item.default)
+        await answer_callback(callback)
+        return
     if item.group == 'general_texts':
         intro = f'✏️ {item.label}\n\n'
         if item.hint:
@@ -838,6 +856,9 @@ async def advanced_edit_finish(message: Message, state: FSMContext):
     try:
         raw_input = message_text_with_custom_emoji_tokens(message) if item.value_type == 'text' else (message.text or '')
         value = _parse_value(item, raw_input)
+        if item.key == 'customer_pack_button_template':
+            from modules.packs import validate_package_button_template
+            value = validate_package_button_template(str(value))
     except ValueError as exc:
         await message.answer(str(exc))
         return
@@ -857,5 +878,10 @@ async def advanced_edit_finish(message: Message, state: FSMContext):
     log_details = {'value': '***' if item.sensitive else value}
     db.add_log(message.from_user.id, 'advanced_setting_changed', 'settings', item.key, log_details)
     await state.clear()
-    await message.answer(f'ذخیره شد ✅\n{item.label}: {_value_text(item)}', reply_markup=back_keyboard())
-    await message.answer(GROUPS[item.group], reply_markup=category_keyboard(item.group))
+    if item.key == 'customer_pack_button_template':
+        with edit_runtime.output_passthrough():
+            await message.answer(f'ذخیره شد ✅\n{item.label}: {str(value)}', reply_markup=back_keyboard())
+            await message.answer(GROUPS[item.group], reply_markup=category_keyboard(item.group))
+    else:
+        await message.answer(f'ذخیره شد ✅\n{item.label}: {_value_text(item)}', reply_markup=back_keyboard())
+        await message.answer(GROUPS[item.group], reply_markup=category_keyboard(item.group))

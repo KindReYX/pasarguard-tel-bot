@@ -453,6 +453,8 @@ def _run_migrations() -> None:
             conn.execute('ALTER TABLE package_settings ADD COLUMN use_product_price INTEGER DEFAULT 0')
         if not _column_exists('package_settings', 'button_template', conn):
             conn.execute('ALTER TABLE package_settings ADD COLUMN button_template TEXT')
+        if not _column_exists('package_settings', 'display_name', conn):
+            conn.execute('ALTER TABLE package_settings ADD COLUMN display_name TEXT')
 
         if not _column_exists('orders', 'customer_username', conn):
             conn.execute('ALTER TABLE orders ADD COLUMN customer_username TEXT')

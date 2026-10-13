@@ -151,7 +151,7 @@ def package_button_context(pack: dict, meta: dict) -> dict[str, str]:
     if product_id:
         row = db.fetchone('SELECT name FROM products WHERE id=?', (int(product_id),)) or {}
         product_name = str(row.get('name') or '')
-    name = pack_title(pack)
+    name = str(meta.get('display_name') or '').strip() or pack_title(pack)
     tid = str(pack.get('id') or meta.get('template_id') or '')
     return {
         'package_name': name, 'name': name, 'package_id': tid, 'template_id': tid,
@@ -216,6 +216,7 @@ def upsert_pack_meta(
     is_visible: int | None = None,
     sort_order: int | None = None,
     use_product_price: int | None = None,
+    display_name: str | None = None,
 ) -> None:
     current = get_pack_meta(str(template_id))
     if price_amount is None:
@@ -226,18 +227,21 @@ def upsert_pack_meta(
         sort_order = int(current.get('sort_order', 1000))
     if use_product_price is None:
         use_product_price = int(current.get('use_product_price') or 0)
+    if display_name is None:
+        display_name = current.get('display_name')
     db.execute(
         '''INSERT INTO package_settings
-           (template_id, price_amount, price_currency, is_visible, sort_order, use_product_price, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+           (template_id, price_amount, price_currency, is_visible, sort_order, use_product_price, display_name, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(template_id) DO UPDATE SET
              price_amount=excluded.price_amount,
              price_currency=excluded.price_currency,
              is_visible=excluded.is_visible,
              sort_order=excluded.sort_order,
              use_product_price=excluded.use_product_price,
+             display_name=excluded.display_name,
              updated_at=excluded.updated_at''',
-        (str(template_id), int(price_amount), price_currency, int(is_visible), int(sort_order), int(use_product_price), db.now_iso()),
+        (str(template_id), int(price_amount), price_currency, int(is_visible), int(sort_order), int(use_product_price), display_name, db.now_iso()),
     )
 
 
@@ -260,7 +264,7 @@ def list_keyboard(packs: list[dict], can_manage: bool) -> InlineKeyboardMarkup:
         meta = local.get(pid, {})
         eye = '👁' if meta.get('is_visible', 1) else '🙈'
         price = format_price(effective_pack_price(meta, pack), meta.get('price_currency', 'TOMAN'))
-        rows.append([InlineKeyboardButton(text=f'{eye} {pack_title(pack)} | {price}', callback_data=f'pack:view:{pid}')])
+        rows.append([InlineKeyboardButton(text=f'{eye} {str(meta.get("display_name") or "").strip() or pack_title(pack)} | {price}', callback_data=f'pack:view:{pid}')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -273,7 +277,7 @@ def detail_text(pack: dict) -> str:
     return (
         '📦 جزئیات بسته\n\n'
         f'ID: {pack.get("id")}\n'
-        f'نام: {pack.get("name")}\n'
+        f'نام: {str(meta.get("display_name") or "").strip() or pack.get("name")}\n'
         f'قیمت فروش: {price} ({price_mode})\n'
         + (f"قیمت عمومی هر گیگ: {int((db.fetchone('SELECT public_price_amount FROM products WHERE id=?', (int(meta.get('product_id')),)) or {}).get('public_price_amount') or 0):,} تومان\n" if int(meta.get('use_product_price') or 0) and meta.get('product_id') else '')
         + f'نمایش در ربات: {visible}\n'
@@ -418,9 +422,11 @@ async def pack_create_value(message: Message, state: FSMContext):
     try:
         if field == 'name':
             value = (message.text or '').strip()
+            display_name = message_text_with_custom_emoji_tokens(message).strip()
             if not value:
                 raise ValueError('نام بسته نمی‌تواند خالی باشد.')
             payload[field] = value
+            await state.update_data(display_name=display_name)
         elif field == 'price_amount':
             price_amount = parse_price(message.text or '')
             await state.update_data(price_amount=price_amount, payload=payload)
@@ -534,7 +540,7 @@ async def pack_create_done(callback: CallbackQuery, state: FSMContext):
     if product_id:
         prow = db.fetchone('SELECT public_price_amount FROM products WHERE id=?', (int(product_id),)) or {}
         use_public = 1 if int(prow.get('public_price_amount') or 0) > 0 else 0
-    upsert_pack_meta(template_id, price_amount=int(price_amount), use_product_price=use_public)
+    upsert_pack_meta(template_id, price_amount=int(price_amount), use_product_price=use_public, display_name=str(data.get('display_name') or '').strip() or None)
     if product_id:
         db.execute('UPDATE package_settings SET product_id=?, use_product_price=?, updated_at=? WHERE template_id=?', (int(product_id), use_public, db.now_iso(), template_id))
     db.add_log(callback.from_user.id, 'create_pack', 'pack', template_id, {**payload, 'price_amount': price_amount})
@@ -695,6 +701,7 @@ async def pack_edit_value(message: Message, state: FSMContext):
     try:
         if field == 'name':
             value = (message.text or '').strip()
+            display_name = message_text_with_custom_emoji_tokens(message).strip()
             if not value:
                 raise ValueError('نام نمی‌تواند خالی باشد.')
             payload[field] = value
@@ -705,6 +712,8 @@ async def pack_edit_value(message: Message, state: FSMContext):
         elif field in {'username_prefix', 'username_suffix'}:
             payload[field] = parse_username_affix(message.text or '')
         updated = await api_client.update_user_template(template_id, payload)
+        if field == 'name':
+            db.execute('UPDATE package_settings SET display_name=?, updated_at=? WHERE template_id=?', (display_name, db.now_iso(), str(template_id)))
         db.add_log(message.from_user.id, 'edit_pack', 'pack', str(template_id), {field: payload[field]})
         await state.clear()
         await message.answer('ویرایش شد.\n\n' + detail_text(updated), reply_markup=detail_keyboard(str(template_id), True))

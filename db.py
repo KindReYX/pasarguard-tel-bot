@@ -1335,6 +1335,26 @@ def transfer_user_service(service_id: int, old_owner: int, new_owner: int) -> No
     )
 
 
+def active_service_owner_for_panel_username(service_username: str) -> int | None:
+    """Return the Telegram owner of an active local service, if registered."""
+    username = str(service_username or '').strip()
+    if not username:
+        return None
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT telegram_id FROM user_services
+               WHERE (panel_username=? OR service_username=?) AND is_active=1
+               ORDER BY updated_at DESC, id DESC""",
+            (username, username),
+        ).fetchall()
+    owners = {int(row['telegram_id']) for row in rows if row['telegram_id'] is not None}
+    if not owners:
+        return None
+    if len(owners) > 1:
+        return -1
+    return next(iter(owners))
+
+
 def adopt_panel_service(
     telegram_id: int,
     service_username: str,
@@ -1348,9 +1368,8 @@ def adopt_panel_service(
     """Attach one existing panel service to a Telegram customer atomically.
 
     Returns ``(service_id, previous_telegram_owner)``. If the same panel username
-    already exists under another Telegram user, ownership is moved instead of
-    creating a duplicate row. Financial/order history is intentionally not
-    transferred: ``order_id`` is cleared when local ownership changes.
+    is already registered to another Telegram user, adoption is rejected. This
+    prevents one bot customer from taking over another customer's service.
     """
     uid = int(telegram_id)
     username = str(service_username or '').strip()
@@ -1376,10 +1395,13 @@ def adopt_panel_service(
             (username, username),
         ).fetchall()
         primary = rows[0] if rows else None
+        active_owners = {int(row['telegram_id']) for row in rows if row['telegram_id'] is not None}
+        if any(owner != uid for owner in active_owners):
+            raise LookupError('service_registered_to_other_user')
         previous_owner = int(primary['telegram_id']) if primary and primary['telegram_id'] is not None else None
         if primary:
             service_id = int(primary['id'])
-            moved = previous_owner != uid
+            moved = False
             conn.execute(
                 '''UPDATE user_services SET telegram_id=?, order_id=?,
                    package_id=COALESCE(?, package_id), package_name=COALESCE(?, package_name),

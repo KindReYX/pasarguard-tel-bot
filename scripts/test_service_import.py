@@ -83,17 +83,21 @@ def test_db_adoption() -> None:
     assert row and row['telegram_id'] == 1001
 
     db.execute('UPDATE user_services SET order_id=77 WHERE id=?', (service_id,))
-    moved_id, old = db.adopt_panel_service(
-        2002,
-        'svc_a',
-        {'username': 'svc_a', 'status': 'active', 'data_limit': 2048},
-        subscription_url='https://sub.example/svc_a',
-        links=[vless],
-    )
-    assert moved_id == service_id
-    assert old == 1001
-    moved = db.get_user_service(service_id, 2002)
-    assert moved and moved['order_id'] is None
+    try:
+        db.adopt_panel_service(
+            2002,
+            'svc_a',
+            {'username': 'svc_a', 'status': 'active', 'data_limit': 2048},
+            subscription_url='https://sub.example/svc_a',
+            links=[vless],
+        )
+    except LookupError as exc:
+        assert str(exc) == 'service_registered_to_other_user'
+    else:
+        raise AssertionError('cross-user adoption must be rejected')
+    original = db.get_user_service(service_id, 1001)
+    assert original and original['order_id'] == 77
+    assert db.get_user_service(service_id, 2002) is None
 
 
 def main() -> None:

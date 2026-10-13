@@ -732,13 +732,9 @@ async def resolve_panel_user_from_access_input(raw_input: str) -> dict:
     return next(iter(matches.values()))
 
 
-async def adopt_panel_user_for_bot(raw_input: str) -> dict:
-    """Resolve service and ensure the bot panel admin owns it.
-
-    This gives the configured bot panel account full management access to the
-    service before it is attached to a Telegram customer.
-    """
-    user_data = await resolve_panel_user_from_access_input(raw_input)
+async def ensure_panel_user_owned_by_bot(user_data: dict) -> dict:
+    """Ensure an already-resolved panel user is owned by the bot admin."""
+    user_data = user_data or {}
     username = str(user_data.get('username') or '').strip()
     if not username:
         raise LookupError('service_username_missing')
@@ -751,6 +747,16 @@ async def adopt_panel_user_for_bot(raw_input: str) -> dict:
         # idempotent and guarantees the bot's full-access admin becomes owner.
         user_data = await set_user_owner(username, target_owner)
     return user_data
+
+
+async def adopt_panel_user_for_bot(raw_input: str) -> dict:
+    """Resolve service and ensure the bot panel admin owns it.
+
+    Kept as a compatibility helper. Customer import performs its local-owner
+    safety check before calling :func:`ensure_panel_user_owned_by_bot`.
+    """
+    user_data = await resolve_panel_user_from_access_input(raw_input)
+    return await ensure_panel_user_owned_by_bot(user_data)
 
 
 async def revoke_user_subscription(username: str) -> dict:

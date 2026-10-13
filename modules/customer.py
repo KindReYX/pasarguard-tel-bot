@@ -1691,10 +1691,17 @@ async def service_import_finish(message: Message, state: FSMContext):
 
     wait = await message.answer('⏳ در حال پیدا کردن سرویس و بررسی مالکیت...')
     try:
-        user_data = await api_client.adopt_panel_user_for_bot(raw)
+        # Resolve first, then verify local bot ownership BEFORE changing the
+        # panel owner. This prevents importing a service already registered to
+        # another Telegram customer.
+        user_data = await api_client.resolve_panel_user_from_access_input(raw)
         username = str(user_data.get('username') or '').strip()
         if not username:
             raise LookupError('service_username_missing')
+        local_owner = db.active_service_owner_for_panel_username(username)
+        if local_owner is not None and local_owner != uid:
+            raise LookupError('service_registered_to_other_user')
+        user_data = await api_client.ensure_panel_user_owned_by_bot(user_data)
 
         links, fresh_user, sub_url = await api_client.get_user_config_links(username)
         if fresh_user:
@@ -1741,6 +1748,8 @@ async def service_import_finish(message: Message, state: FSMContext):
             text = 'این UUID روی بیش از یک سرویس پیدا شد و برای جلوگیری از انتقال اشتباه چیزی تغییر نکرد.'
         elif code == 'service_uuid_missing':
             text = 'هیچ UUIDی در ورودی پیدا نشد. یک کانفیگ دارای UUID یا لینک Subscription ارسال کنید.'
+        elif code == 'service_registered_to_other_user':
+            text = '❌ این اکانت قبلاً در ربات به نام شخص دیگری ثبت شده است و امکان انتقال مالکیت آن وجود ندارد.'
         else:
             text = 'هیچ سرویسی با این UUID در پنل پیدا نشد.'
         try:

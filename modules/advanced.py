@@ -20,6 +20,41 @@ from modules import edit_runtime
 advanced_router = Router()
 
 
+PACKAGE_TEMPLATE_VARIABLES = (
+    'package_name', 'name', 'package_id', 'template_id', 'volume_gb', 'traffic_gb',
+    'data_gb', 'gb', 'price', 'price_toman', 'price_raw', 'duration_days', 'days',
+    'duration_months', 'product_name', 'product_id',
+)
+
+def _package_template_vars_text() -> str:
+    return ' '.join('{' + key + '}' for key in PACKAGE_TEMPLATE_VARIABLES)
+
+def _html_literal_placeholders(value: str) -> str:
+    # Render literal template placeholders safely on admin/template-management pages.
+    # The generic live-edit renderer treats unresolved {foo} as runtime variables, so
+    # braces are encoded before crossing the final output boundary and Telegram turns
+    # them back into visible braces when parsing HTML.
+    return html.escape(str(value or ''), quote=False).replace('{', '&#123;').replace('}', '&#125;')
+
+def _repair_corrupted_package_button_template() -> str:
+    default = '📦 {package_name} | {price}'
+    current = str(db.get_setting('customer_pack_button_template', default) or default)
+    normalized = ' '.join(current.split())
+    # v0.2.98 could persist a rendered admin preview back as the template itself.
+    # Repair only the known signatures produced by that bug; arbitrary user templates
+    # without placeholders are left untouched.
+    known_corrupt = {
+        '📦 - | -GB | - 😡': '📦 {package_name} | {volume_gb}GB | {price} 😡',
+        '📦 - | -GB | -': '📦 {package_name} | {volume_gb}GB | {price}',
+        '📦 - | -': default,
+    }
+    repaired = known_corrupt.get(normalized)
+    if repaired:
+        db.set_setting('customer_pack_button_template', repaired)
+        return repaired
+    return current
+
+
 class AdvancedState(StatesGroup):
     edit_value = State()
     content_text = State()
@@ -379,17 +414,18 @@ def package_buttons_admin_keyboard() -> InlineKeyboardMarkup:
 async def advanced_public_package_buttons(callback: CallbackQuery):
     if not is_super_admin(callback.from_user.id):
         await deny_callback(callback); return
-    template = str(db.get_setting('customer_pack_button_template', '📦 {package_name} | {price}') or '📦 {package_name} | {price}')
-    # This is a template-management page. Bypass generic Live Edit so literal
-    # {package_*} placeholders are never rendered/replaced with '-' on the admin screen.
+    template = _repair_corrupted_package_button_template()
+    # Template-management pages must show placeholders literally. HTML entities make
+    # this robust even if a generic renderer/live-edit override touches the message.
+    body = (
+        '📦 دکمه‌های بسته‌های خرید\n\n'
+        f'قالب عمومی فعلی:\n<code>{_html_literal_placeholders(template)}</code>\n\n'
+        f'متغیرها: <code>{_html_literal_placeholders(_package_template_vars_text())}</code>\n\n'
+        'قالب اختصاصی هر بسته از داخل همان بسته قابل تنظیم است.'
+    )
     with edit_runtime.output_passthrough():
         await edit_or_answer(
-            callback,
-            '📦 دکمه‌های بسته‌های خرید\n\n'
-            f'قالب عمومی فعلی:\n{template}\n\n'
-            'متغیرها: {package_name} {name} {package_id} {template_id} {volume_gb} {traffic_gb} {data_gb} {gb} {price} {price_toman} {price_raw} {duration_days} {days} {duration_months} {product_name} {product_id}\n\n'
-            'قالب اختصاصی هر بسته از داخل همان بسته قابل تنظیم است.',
-            reply_markup=package_buttons_admin_keyboard(),
+            callback, body, reply_markup=package_buttons_admin_keyboard(), parse_mode='HTML'
         )
     await answer_callback(callback)
 
@@ -655,17 +691,21 @@ async def advanced_edit_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(AdvancedState.edit_value)
     await state.update_data(advanced_key=key)
     if key == 'customer_pack_button_template':
-        current = str(db.get_setting(item.key, item.default) or item.default)
+        current = _repair_corrupted_package_button_template()
+        intro = (
+            '✏️ قالب عمومی دکمه بسته‌های خرید\n\n'
+            'قالب را با همین متغیرها بفرستید. Premium Emoji هم پشتیبانی می‌شود.\n'
+            f'متغیرها: <code>{_html_literal_placeholders(_package_template_vars_text())}</code>\n\n'
+            'پیام بعدی قالب فعلی است؛ آن را Copy و ویرایش کنید.'
+        )
         with edit_runtime.output_passthrough():
             await edit_or_answer(
-                callback,
-                '✏️ قالب عمومی دکمه بسته‌های خرید\n\n'
-                'قالب را با همین متغیرها بفرستید. Premium Emoji هم پشتیبانی می‌شود.\n'
-                'متغیرها: {package_name} {name} {package_id} {template_id} {volume_gb} {traffic_gb} {data_gb} {gb} {price} {price_toman} {price_raw} {duration_days} {days} {duration_months} {product_name} {product_id}\n\n'
-                'پیام بعدی قالب فعلی است؛ آن را Copy و ویرایش کنید.',
+                callback, intro, parse_mode='HTML',
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ لغو', callback_data='adv:public:packages')]]),
             )
-            await callback.message.answer(current or item.default)
+            await callback.message.answer(
+                f'<code>{_html_literal_placeholders(current or item.default)}</code>', parse_mode='HTML'
+            )
         await answer_callback(callback)
         return
     if item.group == 'general_texts':

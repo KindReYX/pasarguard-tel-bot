@@ -8,6 +8,7 @@ from keyboards import EditableButtonFilter
 from keyboards import BTN_REPORTS, back_keyboard
 from permissions import deny_message, is_staff
 from utils import fmt_money
+from modules.packs import package_display_name_for_template
 
 reports_router = Router()
 
@@ -23,7 +24,7 @@ async def reports_home(message: Message):
     params = (uid,) if seller_filter else ()
     total = db.fetchone(f"SELECT COALESCE(SUM(amount_toman),0) AS s, COUNT(*) AS c FROM orders WHERE status IN ('paid','build_queued','building_service','service_ready'){seller_filter}", params) or {'s': 0, 'c': 0}
     pending = db.fetchone(f"SELECT COUNT(*) AS c FROM orders WHERE status='pending'{seller_filter}", params) or {'c': 0}
-    top = db.fetchall(f"SELECT package_name, COUNT(*) AS c, COALESCE(SUM(amount_toman),0) AS s FROM orders WHERE status IN ('paid','build_queued','building_service','service_ready'){seller_filter} GROUP BY package_id, package_name ORDER BY c DESC LIMIT 5", params)
+    top = db.fetchall(f"SELECT package_id, package_name, COUNT(*) AS c, COALESCE(SUM(amount_toman),0) AS s FROM orders WHERE status IN ('paid','build_queued','building_service','service_ready'){seller_filter} GROUP BY package_id, package_name ORDER BY c DESC LIMIT 5", params)
     text = (
         '📈 گزارش فروش\n\n'
         f'فروش کل: {fmt_money(total["s"])}\n'
@@ -37,5 +38,5 @@ async def reports_home(message: Message):
         text += 'هنوز داده ای ثبت نشده است.'
     else:
         for row in top:
-            text += f"- {row.get('package_name') or 'بدون نام'} | {row['c']} سفارش | {fmt_money(row['s'])}\n"
+            text += f"- {package_display_name_for_template(row.get('package_id'), row.get('package_name') or 'بدون نام')} | {row['c']} سفارش | {fmt_money(row['s'])}\n"
     await message.answer(text, reply_markup=back_keyboard())

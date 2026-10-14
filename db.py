@@ -445,10 +445,22 @@ def _run_migrations() -> None:
             'custom_user_counts_json': "TEXT DEFAULT '[1]'",
             'custom_user_pricing_mode': "TEXT DEFAULT 'fixed'",
             'custom_user_values_json': "TEXT DEFAULT '{}'",
+            'description_text': 'TEXT',
+            'test_description_text': 'TEXT',
         }
         for col, spec in product_cols.items():
             if not _column_exists('products', col, conn):
                 conn.execute(f'ALTER TABLE products ADD COLUMN {col} {spec}')
+        # Freeze the legacy shared test-page text into each existing product once.
+        # From this release onward each product owns its own test_description_text.
+        legacy_test_text_row = conn.execute("SELECT value FROM settings WHERE key='test_service_text'").fetchone()
+        if legacy_test_text_row and legacy_test_text_row['value']:
+            try:
+                legacy_test_text = json.loads(legacy_test_text_row['value'])
+            except Exception:
+                legacy_test_text = legacy_test_text_row['value']
+            if isinstance(legacy_test_text, str) and legacy_test_text.strip():
+                conn.execute("UPDATE products SET test_description_text=? WHERE test_description_text IS NULL OR TRIM(test_description_text)=''", (legacy_test_text,))
         if not _column_exists('package_settings', 'use_product_price', conn):
             conn.execute('ALTER TABLE package_settings ADD COLUMN use_product_price INTEGER DEFAULT 0')
         if not _column_exists('package_settings', 'button_template', conn):

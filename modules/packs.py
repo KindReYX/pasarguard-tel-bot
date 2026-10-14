@@ -14,6 +14,8 @@ from utils import edit_or_answer, answer_callback, message_text_with_custom_emoj
 from keyboards import EditableButtonFilter
 from keyboards import BTN_PACKAGES, back_keyboard
 from permissions import can_manage_packs, can_view_packs, deny_message, deny_callback
+from template_context import enrich_template_context
+from modules.variables import ALL_VARIABLES
 
 packs_router = Router()
 
@@ -127,11 +129,8 @@ def effective_pack_price(meta: dict, pack: dict | None = None) -> int:
 
 
 PACKAGE_BUTTON_DEFAULT_TEMPLATE = "📦 {package_name} | {price}"
-PACKAGE_BUTTON_VARIABLES = {
-    'package_name', 'name', 'package_id', 'template_id', 'volume_gb', 'traffic_gb', 'data_gb', 'gb',
-    'price', 'price_toman', 'price_raw', 'duration_days', 'days', 'duration_months',
-    'product_name', 'product_id',
-}
+PACKAGE_BUTTON_VARIABLES = set(ALL_VARIABLES)
+
 
 
 def _pretty_decimal(value: Decimal) -> str:
@@ -153,14 +152,18 @@ def package_button_context(pack: dict, meta: dict) -> dict[str, str]:
         product_name = str(row.get('name') or '')
     name = pack_display_name(pack, meta)
     tid = str(pack.get('id') or meta.get('template_id') or '')
-    return {
+    return enrich_template_context({
         'package_name': name, 'name': name, 'package_id': tid, 'template_id': tid,
         'volume_gb': _pretty_decimal(gb), 'traffic_gb': _pretty_decimal(gb), 'data_gb': _pretty_decimal(gb), 'gb': _pretty_decimal(gb),
         'price': format_price(price_raw), 'price_toman': f'{int(price_raw):,}', 'price_raw': str(int(price_raw)),
+        'package_price': format_price(price_raw), 'package_price_raw': str(int(price_raw)),
+        'package_data_limit': _pretty_decimal(gb) + ' GB' if gb > 0 else '',
+        'package_data_limit_raw': str(int(pack.get('data_limit') or 0)),
         'duration_days': _pretty_decimal(days), 'days': _pretty_decimal(days),
         'duration_months': _pretty_decimal(months),
+        'package_duration_seconds': str(seconds), 'duration_seconds': str(seconds),
         'product_name': product_name, 'product_id': str(product_id or ''),
-    }
+    })
 
 
 def validate_package_button_template(template: str) -> str:

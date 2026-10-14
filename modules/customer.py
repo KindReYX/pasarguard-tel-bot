@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import html
 import math
 import re
@@ -478,6 +479,35 @@ def customer_packs_keyboard(items: list[tuple[dict, dict]], product_id: int | No
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+async def load_full_product_packs(product_id: int) -> list[dict]:
+    """Load full template details so volume variables never come from lightweight summaries."""
+    metas = db.fetchall('SELECT template_id FROM package_settings WHERE product_id=? AND is_visible=1 ORDER BY sort_order, template_id', (int(product_id),))
+    ids = [str(row.get('template_id')) for row in metas if row.get('template_id') is not None]
+    if not ids:
+        return []
+    semaphore = asyncio.Semaphore(4)
+    async def one(tid: str):
+        async with semaphore:
+            try:
+                return await api_client.get_user_template(tid)
+            except Exception:
+                return {'id': tid, 'name': f'بسته {tid}'}
+    return list(await asyncio.gather(*(one(tid) for tid in ids)))
+
+
+async def load_full_visible_packs() -> list[dict]:
+    metas = db.fetchall('SELECT template_id FROM package_settings WHERE is_visible=1 ORDER BY sort_order, template_id')
+    ids = [str(row.get('template_id')) for row in metas if row.get('template_id') is not None]
+    semaphore = asyncio.Semaphore(4)
+    async def one(tid: str):
+        async with semaphore:
+            try:
+                return await api_client.get_user_template(tid)
+            except Exception:
+                return {'id': tid, 'name': f'بسته {tid}'}
+    return list(await asyncio.gather(*(one(tid) for tid in ids))) if ids else []
+
+
 def customer_available_products() -> list[dict]:
     return db.fetchall(
         '''SELECT DISTINCT p.* FROM products p
@@ -513,32 +543,43 @@ def customer_products_keyboard(rows: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def product_category_text_parts(product: dict) -> tuple[str, str, dict[str, str]]:
-    """Independent editable text for a single product/category purchase page."""
+def product_category_text_parts(product: dict) -> tuple[str, str, dict[str, Any]]:
+    """Strictly per-product category text; never shared through a global setting."""
     product_id = int(product.get('id') or 0)
     product_name = str(product.get('name') or 'محصول')
-    setting_key = f'product_category_text:{product_id}'
     default_template = '🛍 {product_name}\n\nبسته موردنظر را انتخاب کنید:'
+    setting_key = f'product_description:{product_id}'
+    template = str(db.get_setting(setting_key, '') or '').strip() or str(product.get('description_text') or '').strip()
+    if not template:
+        legacy = str(db.get_setting(f'product_category_text:{product_id}', '') or '').strip()
+        template = legacy or default_template
+        if product_id:
+            try:
+                db.execute('UPDATE products SET description_text=?, updated_at=? WHERE id=?', (template, db.now_iso(), product_id))
+            except Exception:
+                pass
     context = {'product_id': str(product_id), 'product_name': product_name}
-    return setting_key, default_template, context
+    return setting_key, template, context
 
 
 async def show_product_category_message(message: Message, product: dict, reply_markup: InlineKeyboardMarkup) -> None:
     setting_key, template, context = product_category_text_parts(product)
+    rendered = await render_template_html(message.bot, template, context)
     with edit_runtime.text_hint(
         setting_key=setting_key, template=template, variables=context,
         content_key=setting_key, label=f"توضیحات دسته {context['product_name']}", allow_stickers=True,
     ):
-        await message.answer(template, reply_markup=reply_markup)
+        await message.answer(rendered, reply_markup=reply_markup, parse_mode='HTML')
 
 
 async def edit_product_category_message(callback: CallbackQuery, product: dict, reply_markup: InlineKeyboardMarkup) -> None:
     setting_key, template, context = product_category_text_parts(product)
+    rendered = await render_template_html(callback.bot, template, context)
     with edit_runtime.text_hint(
         setting_key=setting_key, template=template, variables=context,
         content_key=setting_key, label=f"توضیحات دسته {context['product_name']}", allow_stickers=True,
     ):
-        await edit_or_answer(callback, template, reply_markup=reply_markup)
+        await edit_or_answer(callback, rendered, reply_markup=reply_markup, parse_mode='HTML')
 
 
 def customer_renew_packs_keyboard(items: list[tuple[dict, dict]], service_id: int) -> InlineKeyboardMarkup:
@@ -1256,7 +1297,7 @@ async def buy_subscription(message: Message, state: FSMContext):
         await message.answer('فعلا محصول فعالی برای خرید وجود ندارد.', reply_markup=customer_keyboard())
         return
     if len(rows) == 1:
-        packs = await api_client.get_user_templates()
+        packs = await load_full_product_packs(int(rows[0]['id']))
         items = visible_pack_rows_for_product(packs, int(rows[0]['id']))
         product_id = int(rows[0]['id'])
         custom_enabled = int(rows[0].get('custom_enabled') or 0)
@@ -1272,7 +1313,7 @@ async def buy_subscription(message: Message, state: FSMContext):
 async def customer_products(callback: CallbackQuery):
     rows = customer_available_products()
     if len(rows) == 1:
-        packs = await api_client.get_user_templates()
+        packs = await load_full_product_packs(int(rows[0]['id']))
         items = visible_pack_rows_for_product(packs, int(rows[0]['id']))
         await edit_product_category_message(callback, rows[0], customer_packs_keyboard(items, int(rows[0]['id'])))
     else:
@@ -1286,7 +1327,7 @@ async def customer_choose_product(callback: CallbackQuery):
     product = db.fetchone('SELECT * FROM products WHERE id=? AND is_active=1', (product_id,))
     if not product:
         await callback.answer('این محصول در دسترس نیست.', show_alert=True); return
-    packs = await api_client.get_user_templates()
+    packs = await load_full_product_packs(product_id)
     items = visible_pack_rows_for_product(packs, product_id)
     if not items and not int(product.get('custom_enabled') or 0):
         await callback.answer('این محصول فعلا بسته قابل خرید ندارد.', show_alert=True); return
@@ -1958,7 +1999,7 @@ async def service_renew(callback: CallbackQuery, state: FSMContext):
 
     # Offer visible renewal plans so user can renew with their current plan or choose another plan
     try:
-        packs = await api_client.get_user_templates()
+        packs = await load_full_visible_packs()
         items = visible_pack_rows(packs)
     except Exception:
         items = []
@@ -2197,14 +2238,28 @@ async def customer_referral(message: Message, bot):
     )
 
 
-async def _test_service_page_text(bot, user, product: dict | None = None) -> str:
-    template = str(db.get_setting('test_service_text', '🧪 سرویس تست') or '🧪 سرویس تست')
+def _test_service_page_parts(user, product: dict | None = None) -> tuple[str, str, dict[str, Any]]:
     support = str(db.get_setting('support_username', '') or '')
     context = user_template_context(user, support=support)
-    context.update({
-        'product_id': (product or {}).get('id', ''),
-        'product_name': (product or {}).get('name', ''),
-    })
+    if product:
+        pid = int(product.get('id') or 0)
+        fresh = db.fetchone('SELECT * FROM products WHERE id=?', (pid,)) or product
+        setting_key = f'test_service_product_text:{pid}'
+        template = str(db.get_setting(setting_key, '') or '').strip() or str(fresh.get('test_description_text') or '').strip()
+        if not template:
+            template = '🧪 تست {product_name}\n\nبرای دریافت سرویس تست روی دکمه زیر بزنید.'
+            try:
+                db.execute('UPDATE products SET test_description_text=?, updated_at=? WHERE id=?', (template, db.now_iso(), pid))
+            except Exception:
+                pass
+        context.update({'product_id': pid, 'product_name': fresh.get('name', '')})
+        return setting_key, template, context
+    template = str(db.get_setting('test_service_text', '🧪 سرویس تست') or '🧪 سرویس تست')
+    return 'test_service_text', template, context
+
+
+async def _test_service_page_text(bot, user, product: dict | None = None) -> str:
+    _, template, context = _test_service_page_parts(user, product)
     return await render_template_html(bot, template, context)
 
 
@@ -2227,11 +2282,15 @@ async def customer_test_service(message: Message):
         await message.answer(msg, reply_markup=customer_keyboard())
         return
     if len(rows) == 1:
-        page = await _test_service_page_text(message.bot, message.from_user, rows[0])
-        await message.answer(page + f"\n\n🛍 محصول: {html.escape(str(rows[0]['name']))}\nبرای دریافت سرویس تست روی دکمه زیر بزنید.", reply_markup=test_service_keyboard(int(rows[0]['id'])), parse_mode='HTML')
+        key, template, context = _test_service_page_parts(message.from_user, rows[0])
+        page = await render_template_html(message.bot, template, context)
+        with edit_runtime.text_hint(setting_key=key, template=template, variables=context, content_key=key, label=f"متن تست {rows[0]['name']}", allow_stickers=True):
+            await message.answer(page + f"\n\n🛍 محصول: {html.escape(str(rows[0]['name']))}\nبرای دریافت سرویس تست روی دکمه زیر بزنید.", reply_markup=test_service_keyboard(int(rows[0]['id'])), parse_mode='HTML')
         return
-    page = await _test_service_page_text(message.bot, message.from_user)
-    await message.answer(page + '\n\nمحصول موردنظر برای تست را انتخاب کنید:', reply_markup=test_products_keyboard(rows), parse_mode='HTML')
+    key, template, context = _test_service_page_parts(message.from_user)
+    page = await render_template_html(message.bot, template, context)
+    with edit_runtime.text_hint(setting_key=key, template=template, variables=context, content_key=key, label='متن صفحه اصلی سرویس تست', allow_stickers=True):
+        await message.answer(page + '\n\nمحصول موردنظر برای تست را انتخاب کنید:', reply_markup=test_products_keyboard(rows), parse_mode='HTML')
 
 
 @customer_router.callback_query(F.data.startswith('cust_test_product:'))
@@ -2244,8 +2303,10 @@ async def customer_test_product(callback: CallbackQuery):
     if not eligible:
         days=max(1, math.ceil(remaining/86400)) if remaining>0 else 0
         await callback.answer(f'حدود {days} روز دیگر دوباره می توانید سرویس تست بگیرید.' if days else 'شما قبلا سرویس تست را گرفته اید.', show_alert=True); return
-    page = await _test_service_page_text(callback.bot, callback.from_user, row)
-    await edit_or_answer(callback, page + f"\n\n🛍 محصول: {html.escape(str(row['name']))}\nبرای دریافت سرویس تست روی دکمه زیر بزنید.", reply_markup=test_service_keyboard(product_id), parse_mode='HTML')
+    key, template, context = _test_service_page_parts(callback.from_user, row)
+    page = await render_template_html(callback.bot, template, context)
+    with edit_runtime.text_hint(setting_key=key, template=template, variables=context, content_key=key, label=f"متن تست {row['name']}", allow_stickers=True):
+        await edit_or_answer(callback, page + f"\n\n🛍 محصول: {html.escape(str(row['name']))}\nبرای دریافت سرویس تست روی دکمه زیر بزنید.", reply_markup=test_service_keyboard(product_id), parse_mode='HTML')
     await callback.answer()
 
 

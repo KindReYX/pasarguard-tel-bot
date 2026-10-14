@@ -5,6 +5,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 import db
 from utils import edit_or_answer, person_display
+from modules.packs import package_display_name_for_template
 from keyboards import EditableButtonFilter
 from keyboards import back_keyboard, BTN_ORDERS
 from permissions import deny_callback, deny_message, get_role, is_staff
@@ -63,7 +64,7 @@ async def orders_list(callback: CallbackQuery):
     text = f'🧾 سفارش ها | وضعیت: {status}\n\n'
     kb = []
     for row in rows:
-        text += f"#{row['id']} | {person_display(row['user_id'])} | {row.get('package_name') or row.get('package_id')} | {row['amount']} {row.get('currency') or 'XTR'} | {row['status']}\n"
+        text += f"#{row['id']} | {person_display(row['user_id'])} | {package_display_name_for_template(row.get('package_id'), row.get('package_name') or row.get('package_id'))} | {row['amount']} {row.get('currency') or 'XTR'} | {row['status']}\n"
         if role != 'seller':
             kb.append([InlineKeyboardButton(text=f"#{row['id']} تغییر وضعیت", callback_data=f"orders:status:{row['id']}")])
     nav = []

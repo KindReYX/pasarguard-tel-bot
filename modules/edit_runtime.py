@@ -580,23 +580,16 @@ def set_generic_stickers(stable_key: str, values: list[str]) -> None:
 
 def render_simple_template(template: str, variables: dict[str, Any] | None = None) -> str:
     result = str(template or '')
-    ctx = dict(variables or {})
-    alias_groups = (
-        ('order_id', 'entity_id'),
-        ('service_name', 'service_username', 'customer_username', 'panel_username'),
-        ('status', 'final_status'),
-        ('sub_link', 'subscription_url'),
-        ('ref_link', 'referral_link'),
-    )
-    for group in alias_groups:
-        value = next((ctx.get(k) for k in group if ctx.get(k) not in (None, '')), None)
-        if value is not None:
-            for key in group:
-                ctx.setdefault(key, value)
+    try:
+        from template_context import enrich_template_context
+        ctx = enrich_template_context(variables)
+    except Exception:
+        ctx = dict(variables or {})
     for key, value in ctx.items():
         result = result.replace('{' + str(key) + '}', str(value if value is not None else ''))
-    # Live-edit overrides must never expose unresolved internal template tokens.
-    return re.sub(r'\{[A-Za-z_][A-Za-z0-9_]*\}', '-', result)
+    # Known variables are globally accepted; unavailable values render blank instead
+    # of leaking internal placeholders or misleading '-' values.
+    return re.sub(r'\{[A-Za-z_][A-Za-z0-9_]*\}', '', result)
 
 
 def caller_text_target(kind: str, current_text: str) -> tuple[str, str, dict[str, Any]]:

@@ -10,7 +10,7 @@ import db
 from keyboards import BTN_PRODUCTS, EditableButtonFilter, back_keyboard
 from modules.packs import format_price, get_pack_meta, pack_title, pack_display_name, upsert_pack_meta, effective_pack_price
 from permissions import can_manage_packs, can_view_packs, deny_callback, deny_message
-from utils import edit_or_answer, answer_callback
+from utils import edit_or_answer, answer_callback, message_text_with_custom_emoji_tokens
 
 products_router = Router()
 
@@ -18,6 +18,8 @@ products_router = Router()
 class ProductStates(StatesGroup):
     create_name = State()
     rename = State()
+    description_text = State()
+    test_description_text = State()
 
 
 def products() -> list[dict]:
@@ -47,6 +49,8 @@ def product_detail_keyboard(product_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text='🎛 بسته دلخواه', callback_data=f'custom_admin:view:{product_id}'), InlineKeyboardButton(text='💵 قیمت عمومی هر گیگ', callback_data=f'custom_admin:public:{product_id}')],
         [InlineKeyboardButton(text='➕ ساخت بسته جدید', callback_data=f'product:pack_create:{product_id}')],
         [InlineKeyboardButton(text='🔗 افزودن بسته موجود', callback_data=f'product:attach:{product_id}')],
+        [InlineKeyboardButton(text='📝 توضیحات صفحه خرید', callback_data=f'product:description:{product_id}')],
+        [InlineKeyboardButton(text='🧪 توضیحات صفحه تست', callback_data=f'product:test_description:{product_id}')],
         [InlineKeyboardButton(text='✏️ تغییر نام', callback_data=f'product:rename:{product_id}')],
         [InlineKeyboardButton(text='🔄 فعال/غیرفعال', callback_data=f'product:toggle:{product_id}')],
         [InlineKeyboardButton(text='⬆️ بالا', callback_data=f'product:sort:{product_id}:-1'), InlineKeyboardButton(text='⬇️ پایین', callback_data=f'product:sort:{product_id}:1')],
@@ -223,6 +227,84 @@ async def product_pack_create(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer('نام بسته جدید را وارد کنید:')
     await callback.answer()
 
+
+
+@products_router.callback_query(F.data.startswith('product:description:'))
+async def product_description_start(callback: CallbackQuery, state: FSMContext):
+    if not can_manage_packs(callback.from_user.id):
+        await deny_callback(callback); return
+    pid = int(callback.data.split(':')[-1])
+    p = product_row(pid)
+    if not p:
+        await callback.answer('محصول پیدا نشد.', show_alert=True); return
+    current = str(p.get('description_text') or '').strip()
+    if not current:
+        legacy = str(db.get_setting(f'product_category_text:{pid}', '') or '').strip()
+        current = legacy or '🛍 {product_name}\n\nبسته موردنظر را انتخاب کنید:'
+    await state.set_state(ProductStates.description_text)
+    await state.update_data(product_id=pid)
+    await edit_or_answer(
+        callback,
+        '📝 توضیحات صفحه خرید این دسته را بفرستید.\n\n'
+        'این متن فقط برای همین دسته ذخیره می‌شود و هیچ دسته دیگری تغییر نمی‌کند.\n'
+        'متغیرهای عمومی ربات همگی قابل استفاده‌اند؛ نمونه: {product_name} {product_id} {name} {user_id}\n\n'
+        f'متن فعلی:\n{current}',
+        reply_markup=product_input_back_kb(pid),
+    )
+    await callback.answer()
+
+
+@products_router.message(ProductStates.description_text)
+async def product_description_finish(message: Message, state: FSMContext):
+    if not can_manage_packs(message.from_user.id if message.from_user else None):
+        await state.clear(); return
+    data = await state.get_data(); pid = int(data.get('product_id') or 0)
+    text = message_text_with_custom_emoji_tokens(message).strip()
+    if not text:
+        await message.answer('متن نمی‌تواند خالی باشد.'); return
+    db.execute('UPDATE products SET description_text=?, updated_at=? WHERE id=?', (text, db.now_iso(), pid))
+    db.set_setting(f'product_description:{pid}', text)
+    # Remove old generic-live-edit key so it can never override another category.
+    try: db.execute("DELETE FROM settings WHERE key=?", (f'product_category_text:{pid}',))
+    except Exception: pass
+    await state.clear()
+    await message.answer('✅ توضیحات صفحه خرید فقط برای همین دسته ذخیره شد.', reply_markup=product_detail_keyboard(pid))
+
+
+@products_router.callback_query(F.data.startswith('product:test_description:'))
+async def product_test_description_start(callback: CallbackQuery, state: FSMContext):
+    if not can_manage_packs(callback.from_user.id):
+        await deny_callback(callback); return
+    pid = int(callback.data.split(':')[-1])
+    p = product_row(pid)
+    if not p:
+        await callback.answer('محصول پیدا نشد.', show_alert=True); return
+    current = str(p.get('test_description_text') or '').strip() or '🧪 تست {product_name}\n\nبرای دریافت سرویس تست روی دکمه زیر بزنید.'
+    await state.set_state(ProductStates.test_description_text)
+    await state.update_data(product_id=pid)
+    await edit_or_answer(
+        callback,
+        '🧪 توضیحات صفحه تست این دسته را بفرستید.\n\n'
+        'این متن مستقل از متن اصلی سرویس تست و مستقل از بقیه دسته‌هاست.\n'
+        'تمام متغیرهای عمومی قابل استفاده‌اند؛ نمونه: {product_name} {package_name} {name} {user_id}\n\n'
+        f'متن فعلی:\n{current}',
+        reply_markup=product_input_back_kb(pid),
+    )
+    await callback.answer()
+
+
+@products_router.message(ProductStates.test_description_text)
+async def product_test_description_finish(message: Message, state: FSMContext):
+    if not can_manage_packs(message.from_user.id if message.from_user else None):
+        await state.clear(); return
+    data = await state.get_data(); pid = int(data.get('product_id') or 0)
+    text = message_text_with_custom_emoji_tokens(message).strip()
+    if not text:
+        await message.answer('متن نمی‌تواند خالی باشد.'); return
+    db.execute('UPDATE products SET test_description_text=?, updated_at=? WHERE id=?', (text, db.now_iso(), pid))
+    db.set_setting(f'test_service_product_text:{pid}', text)
+    await state.clear()
+    await message.answer('✅ توضیحات تست فقط برای همین دسته ذخیره شد.', reply_markup=product_detail_keyboard(pid))
 
 @products_router.callback_query(F.data.startswith('product:rename:'))
 async def product_rename_start(callback: CallbackQuery, state: FSMContext):

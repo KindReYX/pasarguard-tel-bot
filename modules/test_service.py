@@ -36,7 +36,7 @@ def test_admin_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"🛍 بسته تست محصولات ({configured['c']} تنظیم‌شده)", callback_data='test_admin:products')],
         [InlineKeyboardButton(text=f'⏳ دریافت مجدد بعد از {cooldown_days} روز', callback_data='test_admin:set_cooldown')],
         [InlineKeyboardButton(text='✏️ متن دکمه سرویس تست', callback_data='test_admin:set_button_text')],
-        [InlineKeyboardButton(text='📝 متن صفحه سرویس تست', callback_data='test_admin:set_page_text')],
+        [InlineKeyboardButton(text='📝 متن صفحه اصلی سرویس تست', callback_data='test_admin:set_page_text')],
         [InlineKeyboardButton(text='🔔 متن یادآوری دریافت مجدد', callback_data='test_admin:set_reminder_text')],
         [InlineKeyboardButton(text='🔄 ریست امکان دریافت تست برای همه', callback_data='test_admin:reset_all')],
     ])
@@ -67,6 +67,7 @@ async def product_packs_keyboard(product_id: int) -> InlineKeyboardMarkup:
         pack = panel.get(tid, {'id': tid, 'name': f'بسته {tid}'})
         mark = '✅' if tid == current_tid else '⬜️'
         rows.append([InlineKeyboardButton(text=f"{mark} {pack.get('name') or tid}", callback_data=f'test_admin:choose:{product_id}:{tid}')])
+    rows.append([InlineKeyboardButton(text='📝 متن صفحه تست این محصول', callback_data=f'product:test_description:{product_id}')])
     if current_tid:
         rows.append([InlineKeyboardButton(text='🗑 حذف بسته تست این محصول', callback_data=f'test_admin:clear:{product_id}')])
     if not metas:
@@ -213,7 +214,7 @@ async def test_page_text_start(callback: CallbackQuery, state: FSMContext):
         await deny_callback(callback); return
     await state.set_state(TestServiceState.page_text)
     current = str(db.get_setting('test_service_text', 'سرویس تست') or 'سرویس تست')
-    await edit_or_answer(callback, 'متن صفحه سرویس تست را ارسال کنید.\n\nمتغیرها: {name} {first_name} {username} {user_id} {product_id} {product_name} {support}\n\nمتن فعلی:\n' + current)
+    await edit_or_answer(callback, 'متن صفحه اصلی سرویس تست را ارسال کنید. این متن فقط صفحه انتخاب محصول است و متن تست هر محصول از داخل همان محصول جداست.\n\nمتغیرها: {name} {first_name} {username} {user_id} {product_id} {product_name} {support}\n\nمتن فعلی:\n' + current)
     await answer_callback(callback)
 
 

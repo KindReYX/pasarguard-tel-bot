@@ -28,6 +28,7 @@ BTN_ADMINS = '🛡 مدیریت ادمین‌ها'
 BTN_NOTIFICATIONS = '🔔 اعلان‌ها'
 BTN_FORCE_JOIN = '🔐 جوین اجباری'
 BTN_ADVANCED_SETTINGS = '🧩 تنظیمات پیشرفته'
+BTN_VARIABLES = '🧬 متغیرها'
 BTN_REFERRAL = '👥 دعوت دوستان'
 BTN_TEST_SERVICE = '🧪 سرویس تست'
 BTN_TEST_SETTINGS = '🧪 تنظیمات بسته تست'
@@ -269,7 +270,8 @@ def main_admin_keyboard(role: str) -> ReplyKeyboardMarkup:
         [_kb(BTN_EDIT_MODE)],
         [_kb(BTN_MAINTENANCE), _kb(BTN_EXPORTS)],
         [_kb(BTN_NOTIFICATIONS), _kb(BTN_FORCE_JOIN)],
-        [_kb(BTN_ADVANCED_SETTINGS), _kb(BTN_REFERRAL)],
+        [_kb(BTN_ADVANCED_SETTINGS), _kb(BTN_VARIABLES)],
+        [_kb(BTN_REFERRAL)],
         [_kb(BTN_SYSTEM_HEALTH), _kb(BTN_PAYMENT_ENGINE)],
         [_kb(BTN_SYSTEM_ERRORS), _kb(BTN_SELLER_PANEL)],
         [_kb(BTN_CARD_RECEIPTS), _kb(BTN_CAMPAIGNS)],

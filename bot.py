@@ -50,6 +50,7 @@ from modules.ad_tracking import ad_tracking_router
 from modules.edit_mode import edit_router
 from modules import edit_runtime
 from modules.updater import updater_router
+from modules.variables import variables_router
 
 
 async def send_admin_home(message: Message) -> None:
@@ -234,6 +235,7 @@ async def main() -> None:
         tutorials_router,
         ad_tracking_router,
         advanced_router,
+        variables_router,
         updater_router,
         test_service_router,
         stars_router,

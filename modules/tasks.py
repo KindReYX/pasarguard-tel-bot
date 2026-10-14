@@ -5,6 +5,7 @@ from pathlib import Path
 from aiogram import Bot
 import db
 from utils import retry_async
+from modules.packs import package_display_name_for_template
 from datetime import datetime, timezone
 import math
 _TASKS_STARTED = False
@@ -246,7 +247,7 @@ async def _send_expire_warning(bot: Bot, service: dict, seconds: int, expire: in
         return
     user = db.fetchone('SELECT * FROM bot_users WHERE telegram_id=?', (uid,)) or {}
     support = str(db.get_setting('support_username', '') or '')
-    package_name = str(service.get('package_name') or service.get('package_id') or 'نامشخص')
+    package_name = package_display_name_for_template(service.get('package_id'), service.get('package_name') or service.get('package_id') or 'نامشخص')
     service_name = str(service.get('service_username') or service.get('panel_username') or '-')
     days = max(0, math.ceil(max(0, seconds) / 86400))
     hours = max(0, math.ceil(max(0, seconds) / 3600))
@@ -347,7 +348,7 @@ async def test_service_reminder_loop(bot: Bot) -> None:
                         service = db.fetchone('SELECT id, order_id, package_id, package_name, service_username, panel_username, subscription_url, expire, data_limit, used_traffic FROM user_services WHERE id=?', (int(row.get('service_id') or 0),)) if row.get('service_id') else None
                         context = db.product_context_for_template((service or {}).get('package_id'))
                         context.update({
-                            'package_name': str((service or {}).get('package_name') or 'نامشخص'),
+                            'package_name': package_display_name_for_template((service or {}).get('package_id'), (service or {}).get('package_name') or 'نامشخص'),
                             'package_id': str((service or {}).get('package_id') or ''),
                             'service_id': int((service or {}).get('id') or 0),
                             'order_id': str((service or {}).get('order_id') or '-'),

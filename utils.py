@@ -436,31 +436,12 @@ _UNRESOLVED_TEMPLATE_VAR_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def expand_template_context(context: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Add compatibility aliases used by editable texts across the bot.
-
-    Older/custom templates may use a legacy variable name while the caller provides
-    the modern equivalent. Keeping the aliases here gives every renderer the same
-    behavior instead of fixing individual screens one by one.
-    """
-    ctx = dict(context or {})
-
-    alias_groups = (
-        ('order_id', 'entity_id'),
-        ('service_name', 'service_username', 'customer_username', 'panel_username'),
-        ('status', 'final_status'),
-        ('sub_link', 'subscription_url'),
-        ('ref_link', 'referral_link'),
-    )
-    for group in alias_groups:
-        value = None
-        for key in group:
-            if key in ctx and ctx.get(key) not in (None, ''):
-                value = ctx.get(key)
-                break
-        if value is not None:
-            for key in group:
-                ctx.setdefault(key, value)
-    return ctx
+    """Return the shared, enriched template context used everywhere in the bot."""
+    try:
+        from template_context import enrich_template_context
+        return enrich_template_context(context)
+    except Exception:
+        return dict(context or {})
 
 
 def _hide_unresolved_template_vars(text: str) -> str:
@@ -470,7 +451,7 @@ def _hide_unresolved_template_vars(text: str) -> str:
     template token. This is a final safety net; callers should still provide real
     values whenever they exist.
     """
-    return _UNRESOLVED_TEMPLATE_VAR_RE.sub('-', str(text or ''))
+    return _UNRESOLVED_TEMPLATE_VAR_RE.sub('', str(text or ''))
 
 
 def render_template_text(template: str | None, context: dict[str, Any] | None = None) -> str:
@@ -532,13 +513,40 @@ async def render_template_html(bot: Bot | None, template: str | None, context: d
     protected = CUSTOM_EMOJI_RE.sub(protect, raw)
 
     # Protect template variables too, so inserted user values are escaped independently.
+    # Premium Emoji tokens may live INSIDE a variable value (most importantly
+    # {package_name}/{product_name}); convert those to the same tg-emoji markers
+    # instead of leaving a literal [CUSTOM_EMOJI_ID] in the rendered message.
     variable_tokens: dict[str, str] = {}
+
+    def variable_html(key: str, value: Any) -> str:
+        raw_value = display_template_value(str(key), value)
+        local_markers: dict[str, str] = {}
+
+        def protect_value_emoji(match):
+            emoji_id = match.group(1)
+            if emoji_id not in ids:
+                ids.append(emoji_id)
+            global_marker = f'\x00CUSTOM_EMOJI_{ids.index(emoji_id)}\x00'
+            local_marker = f'__VALUE_EMOJI_{len(local_markers)}__'
+            local_markers[local_marker] = global_marker
+            return local_marker
+
+        prepared = CUSTOM_EMOJI_RE.sub(protect_value_emoji, raw_value)
+        safe = html.escape(prepared)
+        for local_marker, global_marker in local_markers.items():
+            safe = safe.replace(local_marker, global_marker)
+        if str(key) in COPYABLE_TEMPLATE_VARS and safe:
+            # Telegram custom emoji cannot render inside <code>; copyable identifiers
+            # are plain identifiers anyway, while display names stay outside this set.
+            return '<code>' + safe.replace('`', '') + '</code>'
+        return safe
+
     for idx, (key, value) in enumerate(context.items()):
         marker = f'\x00TPLVAR_{idx}\x00'
         needle = '{' + str(key) + '}'
         if needle in protected:
             protected = protected.replace(needle, marker)
-            variable_tokens[marker] = _template_value_html(str(key), value)
+            variable_tokens[marker] = variable_html(str(key), value)
 
     rendered = html.escape(protected)
     for marker, value in variable_tokens.items():

@@ -18,6 +18,31 @@ class CustomBuyState(StatesGroup):
     volume=State()
 
 def row(pid:int): return db.fetchone('SELECT * FROM products WHERE id=?',(pid,)) or {}
+
+def resolve_custom_base_template_id(pid: int, product: dict | None = None, *, persist: bool = False) -> str:
+    """Return an explicit base template, or safely recover the first attached template.
+
+    Older/customized product rows can have custom_enabled=1 while
+    custom_base_template_id is empty. The customer keyboard used to show the
+    custom-package button in that state, but cust_start rejected it as "not ready".
+    We recover from that inconsistent state by using the first package attached
+    to the same product.
+    """
+    p = product or row(pid)
+    explicit = str(p.get('custom_base_template_id') or '').strip()
+    if explicit:
+        return explicit
+    fallback = db.fetchone(
+        'SELECT template_id FROM package_settings WHERE product_id=? ORDER BY sort_order, template_id LIMIT 1',
+        (int(pid),),
+    ) or {}
+    tid = str(fallback.get('template_id') or '').strip()
+    if tid and persist:
+        db.execute(
+            'UPDATE products SET custom_base_template_id=?,updated_at=? WHERE id=?',
+            (tid, db.now_iso(), int(pid)),
+        )
+    return tid
 def loads(v, default):
     try: return json.loads(v) if v else default
     except Exception: return default
@@ -284,7 +309,11 @@ async def usermode(c:CallbackQuery):
 @custom_packages_router.callback_query(F.data.startswith('cust_custom:'))
 async def cust_start(c:CallbackQuery,state:FSMContext):
     pid=int(c.data.split(':')[-1]); p=row(pid)
-    if not p or not int(p.get('custom_enabled') or 0) or not p.get('custom_base_template_id'): await c.answer('بسته دلخواه فعلا آماده نیست.',show_alert=True); return
+    if not p or not int(p.get('custom_enabled') or 0):
+        await c.answer('بسته دلخواه فعلا فعال نیست.', show_alert=True); return
+    base = resolve_custom_base_template_id(pid, p, persist=True)
+    if not base:
+        await c.answer('برای بسته دلخواه هنوز قالب پایه‌ای به این محصول وصل نشده است.', show_alert=True); return
     await state.set_state(CustomBuyState.volume); await state.update_data(custom_product_id=pid); await edit_or_answer(c,f"حجم دلخواه را وارد کنید ({p.get('custom_min_gb',1)} تا {p.get('custom_max_gb',100)} گیگ):", reply_markup=customer_back_kb(pid)); await c.answer()
 @custom_packages_router.message(CustomBuyState.volume)
 async def cust_volume(m:Message,state:FSMContext):
@@ -319,7 +348,10 @@ async def cust_custom_months_back(c:CallbackQuery,state:FSMContext):
 async def finish_custom(c:CallbackQuery,state:FSMContext,users:int):
     d=await state.get_data(); pid=int(d['custom_product_id']); gb=int(d['custom_gb']); months=int(d['custom_months']); p=row(pid); price=calc_price(p,gb,months,users)
     if price<=0: await c.answer('قیمت این ترکیب تنظیم نشده است.',show_alert=True); return
-    base=str(p.get('custom_base_template_id')); pack=await api_client.get_user_template(base); meta=get_pack_meta(base); custom_id=f'custom:{base}:{gb}:{months}:{users}:{pid}'; name=f'بسته دلخواه {gb}GB / {months} ماه' + (f' / {users} کاربر' if int(p.get('custom_users_enabled') or 0) else '')
+    base=resolve_custom_base_template_id(pid, p, persist=True)
+    if not base:
+        await c.answer('برای بسته دلخواه قالب پایه تنظیم نشده است.', show_alert=True); return
+    pack=await api_client.get_user_template(base); meta=get_pack_meta(base); custom_id=f'custom:{base}:{gb}:{months}:{users}:{pid}'; name=f'بسته دلخواه {gb}GB / {months} ماه' + (f' / {users} کاربر' if int(p.get('custom_users_enabled') or 0) else '')
     await state.set_state(CustomerBuyState.waiting_username); await state.update_data(product_id=str(pid),product_name=str(p.get('name') or ''),package_id=custom_id,package_name=name,price_toman=price,discount_amount=0,coupon_id=None,coupon_code=None,renew_service_id=None,order_type='new',custom_volume_gb=gb,custom_months=months,custom_users=users)
     fake=dict(pack); fake['id']=custom_id; fake['name']=name; fake['data_limit']=gb*1024**3; fake['expire_duration']=months*30*86400; fake['hwid_limit']=users
     prompt,_,_=username_rules_text(fake,dict(meta,price_amount=price),c.from_user); await edit_or_answer(c,prompt,reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ انصراف',callback_data='cust_cancel')]])); await c.answer()

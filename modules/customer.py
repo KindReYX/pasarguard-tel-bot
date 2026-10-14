@@ -470,8 +470,15 @@ def customer_packs_keyboard(items: list[tuple[dict, dict]], product_id: int | No
             )
         ])
     if product_id is not None:
-        pcustom = db.fetchone('SELECT custom_enabled FROM products WHERE id=?', (int(product_id),)) or {}
-        if int(pcustom.get('custom_enabled') or 0):
+        pcustom = db.fetchone('SELECT custom_enabled, custom_base_template_id FROM products WHERE id=?', (int(product_id),)) or {}
+        has_base = bool(str(pcustom.get('custom_base_template_id') or '').strip())
+        if not has_base:
+            fallback = db.fetchone(
+                'SELECT template_id FROM package_settings WHERE product_id=? ORDER BY sort_order, template_id LIMIT 1',
+                (int(product_id),),
+            ) or {}
+            has_base = bool(str(fallback.get('template_id') or '').strip())
+        if int(pcustom.get('custom_enabled') or 0) and has_base:
             rows.append([InlineKeyboardButton(text='🎛 بسته دلخواه', callback_data=f'cust_custom:{int(product_id)}')])
     if product_id is not None and len(customer_available_products()) > 1:
         rows.append([InlineKeyboardButton(text='🔙 محصولات', callback_data='cust_products')])

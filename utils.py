@@ -1286,8 +1286,20 @@ def install_edit_mode_output_patch() -> None:
             # Some callers prepared/rendered their text before the admin changed it, which
             # used to make the previous value leak for one or more messages. The database
             # is now the single source of truth at the final output boundary.
-            template = str(db.get_setting(str(setting_key), hinted_template) if setting_key else hinted_template)
-            final_text = await render_template_html(message.bot, template, variables)
+            persisted = db.get_setting(str(setting_key), None) if setting_key else None
+            # Empty persisted values are not valid Telegram message bodies. Fall back to
+            # the caller's known-good template instead of rendering an empty string.
+            template = str(persisted if persisted not in (None, '') else hinted_template)
+            rendered_template = await render_template_html(message.bot, template, variables)
+            # A text hint describes only the editable portion of a message. Preserve any
+            # runtime suffix/prefix the caller appended (product name, instructions, etc.)
+            # instead of replacing the whole outgoing message with the hinted template.
+            hinted_rendered = await render_template_html(message.bot, hinted_template, variables)
+            outgoing_text = str(outgoing or '')
+            if hinted_rendered and outgoing_text.startswith(hinted_rendered):
+                final_text = rendered_template + outgoing_text[len(hinted_rendered):]
+            else:
+                final_text = rendered_template or outgoing_text
             target = None
             if session:
                 target = edit_runtime.register_text_target(
@@ -1340,8 +1352,15 @@ def install_edit_mode_output_patch() -> None:
             hinted_template = str(hint.get('template') or outgoing or '')
             variables = dict(hint.get('variables') or {})
             # Same DB-at-send guarantee for direct Bot.send_* paths.
-            template = str(db.get_setting(str(setting_key), hinted_template) if setting_key else hinted_template)
-            final_text = await render_template_html(bot, template, variables)
+            persisted = db.get_setting(str(setting_key), None) if setting_key else None
+            template = str(persisted if persisted not in (None, '') else hinted_template)
+            rendered_template = await render_template_html(bot, template, variables)
+            hinted_rendered = await render_template_html(bot, hinted_template, variables)
+            outgoing_text = str(outgoing or '')
+            if hinted_rendered and outgoing_text.startswith(hinted_rendered):
+                final_text = rendered_template + outgoing_text[len(hinted_rendered):]
+            else:
+                final_text = rendered_template or outgoing_text
             target = None
             if session:
                 target = edit_runtime.register_text_target(

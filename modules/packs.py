@@ -70,6 +70,25 @@ def parse_price(text: str) -> int:
     return amount
 
 
+def pack_create_error(exc: Exception) -> str:
+    """Show a useful panel validation error without exposing request credentials."""
+    if isinstance(exc, api_client.PanelAPIError):
+        if exc.status == 403:
+            return 'دسترسی ساخت قالب در پنل برای حساب API فعال نیست.'
+        if exc.status == 409:
+            return 'نام این بسته در پنل تکراری است. نام دیگری انتخاب کنید.'
+        if exc.status == 422:
+            detail = exc.data.get('detail') if isinstance(exc.data, dict) else None
+            if isinstance(detail, list):
+                parts = [str(item.get('msg', '')) for item in detail if isinstance(item, dict)]
+                if parts:
+                    return 'پنل اطلاعات بسته را نپذیرفت: ' + '؛ '.join(parts)[:150]
+            if isinstance(detail, str):
+                return 'پنل اطلاعات بسته را نپذیرفت: ' + detail[:150]
+            return 'پنل اطلاعات بسته را نپذیرفت. نام، حجم، مدت و گروه‌ها را بررسی کنید.'
+    return 'ثبت بسته انجام نشد. ارتباط یا پاسخ پنل را بررسی کنید و دوباره تلاش کنید.'
+
+
 def parse_percent(text: str) -> Decimal:
     value = (text or '').strip().replace('%', '').replace(',', '.')
     if not re.fullmatch(r'\d+(\.\d{1,4})?', value):
@@ -452,6 +471,8 @@ async def pack_create_value(message: Message, state: FSMContext):
             display_name = message_text_with_custom_emoji_tokens(message).strip()
             if not value:
                 raise ValueError('نام بسته نمی‌تواند خالی باشد.')
+            if len(value) > 64:
+                raise ValueError('نام بسته در پنل حداکثر ۶۴ نویسه است.')
             payload[field] = value
             await state.update_data(display_name=display_name)
         elif field == 'price_amount':
@@ -548,31 +569,58 @@ async def pack_create_group_all(callback: CallbackQuery, state: FSMContext):
 
 @packs_router.callback_query(F.data == 'pack:g:create_done')
 async def pack_create_done(callback: CallbackQuery, state: FSMContext):
+    if not can_manage_packs(callback.from_user.id):
+        await deny_callback(callback)
+        return
     data = await state.get_data()
+    if await state.get_state() != PackStates.create_groups.state:
+        await callback.answer('فرایند ساخت بسته فعال نیست.', show_alert=True)
+        return
     selected = data.get('selected_groups', [])
     if not selected:
         await callback.answer('حداقل یک گروه انتخاب کنید.', show_alert=True)
         return
-    payload = data.get('payload', {})
+    payload = dict(data.get('payload') or {})
     price_amount = data.get('price_amount')
     if price_amount is None:
         await callback.answer('قیمت بسته ثبت نشده است.', show_alert=True)
         return
-    payload['group_ids'] = selected
+    payload['group_ids'] = list(selected)
     payload.setdefault('data_limit_reset_strategy', 'no_reset')
-    pack = await api_client.create_user_template(payload)
-    template_id = str(pack.get('id'))
+    template_id = str(data.get('created_template_id') or '')
+    if not template_id:
+        try:
+            pack = await api_client.create_user_template(payload)
+            template_id = str(pack.get('id') or '') if isinstance(pack, dict) else ''
+            if not template_id:
+                raise ValueError('Panel returned no template ID')
+            # Persist the remote ID before any local write or follow-up API call.
+            # A retry can then finish locally without creating a second template.
+            await state.update_data(created_template_id=template_id)
+        except Exception as exc:
+            await callback.answer(pack_create_error(exc), show_alert=True)
+            return
     product_id = data.get('product_id')
-    use_public = 0
-    if product_id:
-        prow = db.fetchone('SELECT public_price_amount FROM products WHERE id=?', (int(product_id),)) or {}
-        use_public = 1 if int(prow.get('public_price_amount') or 0) > 0 else 0
-    upsert_pack_meta(template_id, price_amount=int(price_amount), use_product_price=use_public, display_name=str(data.get('display_name') or '').strip() or None)
-    if product_id:
-        db.execute('UPDATE package_settings SET product_id=?, use_product_price=?, updated_at=? WHERE template_id=?', (int(product_id), use_public, db.now_iso(), template_id))
-    db.add_log(callback.from_user.id, 'create_pack', 'pack', template_id, {**payload, 'price_amount': price_amount})
+    try:
+        use_public = 0
+        if product_id:
+            prow = db.fetchone('SELECT public_price_amount FROM products WHERE id=?', (int(product_id),)) or {}
+            use_public = 1 if int(prow.get('public_price_amount') or 0) > 0 else 0
+        upsert_pack_meta(template_id, price_amount=int(price_amount), use_product_price=use_public, display_name=str(data.get('display_name') or '').strip() or None)
+        if product_id:
+            db.execute('UPDATE package_settings SET product_id=?, use_product_price=?, updated_at=? WHERE template_id=?', (int(product_id), use_public, db.now_iso(), template_id))
+    except Exception:
+        await callback.answer('بسته در پنل ساخته شد، اما ذخیره تنظیمات ربات ناموفق بود. دوباره «تأیید گروه‌ها» را بزنید؛ بسته تکراری ساخته نمی‌شود.', show_alert=True)
+        return
+    try:
+        db.add_log(callback.from_user.id, 'create_pack', 'pack', template_id, {**payload, 'price_amount': price_amount})
+    except Exception:
+        pass
     await state.clear()
-    fresh = await api_client.get_user_template(template_id)
+    try:
+        fresh = await api_client.get_user_template(template_id)
+    except Exception:
+        fresh = pack if 'pack' in locals() else {'id': template_id, **payload}
     await edit_or_answer(callback, 'بسته ساخته شد.\n\n' + detail_text(fresh), reply_markup=detail_keyboard(template_id, True))
     await callback.answer()
 

@@ -12,7 +12,7 @@ from typing import Any
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Message
 from aiogram.exceptions import TelegramBadRequest
 
 import api_client
@@ -34,6 +34,7 @@ from utils import answer_template, edit_or_answer, friendly_error, user_template
 import modules.payment_engine as payment_engine
 from modules import edit_runtime
 from modules.qr_tools import send_qr_photo, make_qr_file
+from modules.wireguard_files import get_wireguard_config, is_wireguard_link
 from modules import tetrapay, plisio_pay
 from modules.packs import public_price_for_pack, render_package_button_text, pack_display_name, package_display_name_for_template
 
@@ -301,6 +302,30 @@ async def send_config_delivery(message: Message, service: dict, config_link: str
     )
     if not sent:
         await message.answer('⚠️ امکان ساخت QR برای این کانفیگ وجود نداشت.')
+        return
+    if is_wireguard_link(config_link):
+        try:
+            subscription_url = service.get('subscription_url')
+            content = await get_wireguard_config(config_link, subscription_url)
+            if content:
+                filename = f"wireguard_{int(service.get('id') or 0)}_{index + 1}.conf"
+                with edit_runtime.output_passthrough():
+                    await message.answer_document(
+                        BufferedInputFile(content, filename=filename),
+                        caption='📄 فایل کانفیگ WireGuard',
+                    )
+            else:
+                await message.answer('⚠️ فایل این کانفیگ وایرگارد در خروجی پنل پیدا نشد؛ لینک و QR ارسال شدند.')
+        except Exception as exc:
+            try:
+                db.record_system_error(
+                    'customer.send_wireguard_config', type(exc).__name__,
+                    entity_type='service', entity_id=str(service.get('id') or ''),
+                    error_type=type(exc).__name__,
+                )
+            except Exception:
+                pass
+            await message.answer('⚠️ ارسال فایل وایرگارد ناموفق بود؛ لینک و QR ارسال شدند.')
 
 
 def format_toman(amount: int | None) -> str:
@@ -1955,6 +1980,8 @@ async def service_config_send(callback: CallbackQuery):
     if index < 0 or index >= len(links):
         await callback.answer('کانفیگ پیدا نشد.', show_alert=True)
         return
+    # get_service_config_links may have refreshed the subscription URL in DB.
+    service = db.get_user_service(service_id, callback.from_user.id) or service
     await send_config_delivery(callback.message, service, links[index], index=index)
     await callback.answer('ارسال شد.')
 
@@ -2279,7 +2306,17 @@ async def customer_test_service(message: Message):
     if not rows:
         await message.answer('فعلا سرویس تست توسط ادمین فعال نشده است.', reply_markup=customer_keyboard())
         return
-    eligible, remaining = db.test_service_eligibility(message.from_user.id)
+    if db.test_service_scope() == 'per_product':
+        available = [p for p in rows if db.test_service_eligibility(message.from_user.id, product_id=int(p['id']))[0]]
+        if available:
+            rows = available
+        else:
+            remaining = min(db.test_service_eligibility(message.from_user.id, product_id=int(p['id']))[1] for p in rows)
+            days = max(1, math.ceil(remaining / 86400)) if remaining > 0 else 0
+            msg = f'تست همه محصولات را دریافت کرده‌اید. حدود {days} روز دیگر امکان دریافت مجدد دارید.' if days else 'تست همه محصولات را دریافت کرده‌اید.'
+            await message.answer(msg, reply_markup=customer_keyboard())
+            return
+    eligible, remaining = db.test_service_eligibility(message.from_user.id, product_id=int(rows[0]['id']) if db.test_service_scope() == 'per_product' else None)
     if not eligible:
         if remaining > 0:
             days = max(1, math.ceil(remaining / 86400))
@@ -2306,7 +2343,7 @@ async def customer_test_product(callback: CallbackQuery):
     row = db.fetchone('''SELECT p.*, pt.template_id FROM products p JOIN product_test_templates pt ON pt.product_id=p.id WHERE p.id=? AND p.is_active=1''', (product_id,))
     if not row:
         await callback.answer('تست این محصول فعال نیست.', show_alert=True); return
-    eligible, remaining = db.test_service_eligibility(callback.from_user.id)
+    eligible, remaining = db.test_service_eligibility(callback.from_user.id, product_id=product_id)
     if not eligible:
         days=max(1, math.ceil(remaining/86400)) if remaining>0 else 0
         await callback.answer(f'حدود {days} روز دیگر دوباره می توانید سرویس تست بگیرید.' if days else 'شما قبلا سرویس تست را گرفته اید.', show_alert=True); return
@@ -2323,17 +2360,18 @@ async def customer_test_get(callback: CallbackQuery):
     parts = callback.data.split(':', 1)
     if len(parts) == 2 and parts[1].isdigit():
         product_id = int(parts[1])
-        row = db.fetchone('''SELECT p.name, pt.template_id FROM products p JOIN product_test_templates pt ON pt.product_id=p.id WHERE p.id=? AND p.is_active=1''', (product_id,))
+        row = db.fetchone('''SELECT p.id, p.name, pt.template_id FROM products p JOIN product_test_templates pt ON pt.product_id=p.id WHERE p.id=? AND p.is_active=1''', (product_id,))
     else:
         row = None
         legacy = db.get_setting('test_template_id', None)
         if legacy:
-            row = {'name': 'سرویس تست', 'template_id': legacy}
+            owner = db.product_for_template(legacy) or {}
+            row = {'id': owner.get('id'), 'name': 'سرویس تست', 'template_id': legacy}
     if not row:
         await callback.answer('سرویس تست فعال نیست.', show_alert=True)
         return
     template_id = str(row['template_id'])
-    eligible, remaining = db.test_service_eligibility(user_id)
+    eligible, remaining = db.test_service_eligibility(user_id, product_id=row.get('id'))
     if not eligible:
         if remaining > 0:
             days = max(1, math.ceil(remaining / 86400))
@@ -2366,7 +2404,7 @@ async def customer_test_get(callback: CallbackQuery):
         sub_url = sub_url or api_client.extract_subscription_url(created_user)
         if not links: links = api_client.extract_config_links(created_user)
         service_id = db.save_user_service(telegram_id=user_id, order_id=None, package_id=template_id, package_name=f"سرویس تست - {row['name']}", service_username=actual_username, user_data=user_data or created_user, subscription_url=sub_url, links=links)
-        db.mark_test_used(user_id, service_id)
+        db.mark_test_used(user_id, service_id, product_id=row.get('id'))
         saved_service = db.get_user_service(service_id, user_id) or {'service_username': actual_username, 'subscription_url': sub_url}
         await edit_or_answer(callback, f'سرویس تست ساخته شد ✅\n\nنام سرویس: {copy_code(actual_username)}', parse_mode='Markdown')
         await send_subscription_delivery(callback.message, saved_service, sub_url=sub_url, title='🔗 لینک اشتراک سرویس تست')

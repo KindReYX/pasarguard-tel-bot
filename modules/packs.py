@@ -22,7 +22,7 @@ packs_router = Router()
 # Required for creating a sellable package inside the bot. price_amount is local-only
 # and is stored in package_settings; the rest is sent to the panel API.
 REQUIRED = {'name', 'price_amount', 'data_limit', 'expire_duration', 'group_ids'}
-STEPS = ['name', 'price_amount', 'data_limit', 'expire_duration', 'group_ids']
+STEPS = ['name', 'price_amount', 'data_limit', 'expire_duration', 'hwid_limit', 'group_ids']
 
 
 class PackStates(StatesGroup):
@@ -68,6 +68,15 @@ def parse_price(text: str) -> int:
     if amount < 0:
         raise ValueError('مبلغ نمی‌تواند منفی باشد.')
     return amount
+
+
+def parse_hwid_limit(text: str) -> int | None:
+    """None leaves the template unset, so the bot's existing fallback applies."""
+    value = (text or '').strip()
+    if not re.fullmatch(r'\d+', value):
+        raise ValueError('محدودیت HWID باید عدد صحیح باشد؛ 0 یعنی استفاده از تنظیم پیش‌فرض.')
+    count = int(value)
+    return count or None
 
 
 def pack_create_error(exc: Exception) -> str:
@@ -351,6 +360,7 @@ def detail_keyboard(template_id: str, can_manage: bool) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text='💰 قیمت', callback_data=f'pack:price:{template_id}'), InlineKeyboardButton(text='🔗 قیمت عمومی', callback_data=f'pack:public_price:{template_id}')],
             [InlineKeyboardButton(text='✏️ نام', callback_data=f'pack:edit:{template_id}:name'), InlineKeyboardButton(text='📦 حجم', callback_data=f'pack:edit:{template_id}:data_limit')],
             [InlineKeyboardButton(text='⏳ مدت', callback_data=f'pack:edit:{template_id}:expire_duration'), InlineKeyboardButton(text='👥 گروه‌ها', callback_data=f'pack:edit:{template_id}:group_ids')],
+            [InlineKeyboardButton(text='📱 محدودیت HWID', callback_data=f'pack:edit:{template_id}:hwid_limit')],
             [InlineKeyboardButton(text='⬅️ پیش از نام', callback_data=f'pack:edit:{template_id}:username_prefix'), InlineKeyboardButton(text='➡️ پس از نام', callback_data=f'pack:edit:{template_id}:username_suffix')],
             [InlineKeyboardButton(text='🧩 قالب دکمه مشتری', callback_data=f'pack:button_template:{template_id}')],
             [InlineKeyboardButton(text='👁 نمایش/عدم نمایش', callback_data=f'pack:visible:{template_id}')],
@@ -443,8 +453,8 @@ async def pack_create_value(message: Message, state: FSMContext):
     step = data.get('step', 0)
     payload = data.get('payload', {})
 
-    # Only the first four STEPS are text-input stages. group_ids is selected
-    # via inline callbacks. Older/interrupted FSM data could leave step=4 while
+    # All but the last step are text-input stages. group_ids is selected
+    # via inline callbacks. Older/interrupted FSM data could leave a terminal step while
     # still in create_value; recover instead of indexing past the input stages.
     input_steps = STEPS[:-1]
     if not isinstance(step, int) or step < 0:
@@ -482,11 +492,13 @@ async def pack_create_value(message: Message, state: FSMContext):
             payload[field] = parse_bytes(message.text or '')
         elif field == 'expire_duration':
             payload[field] = parse_duration(message.text or '')
+        elif field == 'hwid_limit':
+            payload[field] = parse_hwid_limit(message.text or '')
 
         next_step = step + 1
         if next_step == len(input_steps):
             # Change FSM state first so a duplicate/fast second message cannot
-            # observe create_value together with terminal step=4.
+            # observe create_value together with the terminal step.
             await state.set_state(PackStates.create_groups)
             await state.update_data(payload=payload, step=next_step, selected_groups=[])
         else:
@@ -502,13 +514,15 @@ async def pack_create_value(message: Message, state: FSMContext):
     elif next_step == 3:
         await message.answer('مدت اعتبار را وارد کنید. مثال: 30d یا 30 روز', reply_markup=pack_create_back_keyboard())
     elif next_step == 4:
-        # State was already switched before step=4 was persisted. Now loading
+        await message.answer('محدودیت HWID این بسته را وارد کنید. مثال: 2\n0 یعنی استفاده از تنظیم پیش‌فرض ربات/سرور.', reply_markup=pack_create_back_keyboard())
+    elif next_step == 5:
+        # State was already switched before the final step was persisted. Now loading
         # panel groups is safe even with duplicate/very fast user messages.
         try:
             groups = await api_client.get_groups()
         except Exception as exc:
             await message.answer(
-                'مدت بسته ثبت شد ✅\n'
+                'محدودیت HWID ثبت شد ✅\n'
                 'اما دریافت گروه‌های پنل موقتاً خطا داد. دوباره تلاش کنید:',
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔄 تلاش دوباره برای گروه‌ها', callback_data='pack:g:create_load')],[InlineKeyboardButton(text='⬅️ بازگشت', callback_data='pack:create_cancel')]]),
             )
@@ -755,7 +769,13 @@ async def pack_edit_start(callback: CallbackQuery, state: FSMContext):
         return
     await state.set_state(PackStates.edit_value)
     await state.update_data(template_id=template_id, field=field)
-    if field in {'username_prefix', 'username_suffix'}:
+    if field == 'hwid_limit':
+        current = (await api_client.get_user_template(template_id)).get('hwid_limit')
+        await callback.message.answer(
+            f'محدودیت HWID فعلی: {current if current not in (None, 0) else "تنظیم پیش‌فرض"}\n'
+            'عدد جدید را وارد کنید. مثال: 2\n0 یعنی استفاده از تنظیم پیش‌فرض ربات/سرور.'
+        )
+    elif field in {'username_prefix', 'username_suffix'}:
         current = (await api_client.get_user_template(template_id)).get(field) or 'ندارد'
         await callback.message.answer(
             f'مقدار جدید را ارسال کنید. مقدار فعلی: {current}\n\n'
@@ -784,6 +804,8 @@ async def pack_edit_value(message: Message, state: FSMContext):
             payload[field] = parse_bytes(message.text or '')
         elif field == 'expire_duration':
             payload[field] = parse_duration(message.text or '')
+        elif field == 'hwid_limit':
+            payload[field] = parse_hwid_limit(message.text or '')
         elif field in {'username_prefix', 'username_suffix'}:
             payload[field] = parse_username_affix(message.text or '')
         updated = await api_client.update_user_template(template_id, payload)

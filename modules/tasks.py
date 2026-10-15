@@ -368,7 +368,7 @@ async def test_service_reminder_loop(bot: Bot) -> None:
                         try:
                             text = await render_template_html(bot, template, context)
                             await bot.send_message(uid, text, parse_mode='HTML')
-                            db.mark_test_reminder_sent(uid, str(row.get('created_at') or ''))
+                            db.mark_test_reminder_sent(uid, str(row.get('created_at') or ''), product_id=row.get('product_id'))
                         except Exception as exc:
                             db.record_system_error('tasks.test_service_reminder_send', str(exc), user_id=uid, error_type=type(exc).__name__)
                         await asyncio.sleep(0.05)

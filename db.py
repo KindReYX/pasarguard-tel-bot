@@ -570,6 +570,25 @@ def _run_migrations() -> None:
 
         if not _column_exists('test_service_usage', 'reminder_sent_at', conn):
             conn.execute('ALTER TABLE test_service_usage ADD COLUMN reminder_sent_at TEXT')
+        conn.execute('''CREATE TABLE IF NOT EXISTS test_service_product_usage (
+                user_id INTEGER NOT NULL,
+                product_id INTEGER NOT NULL,
+                service_id INTEGER,
+                generation INTEGER DEFAULT 1,
+                created_at TEXT,
+                reminder_sent_at TEXT,
+                PRIMARY KEY(user_id, product_id)
+            )''')
+        # Attribute existing test usage to its product without removing the old
+        # global record. INSERT OR IGNORE makes this safe on every startup.
+        conn.execute('''INSERT OR IGNORE INTO test_service_product_usage
+                (user_id, product_id, service_id, generation, created_at, reminder_sent_at)
+                SELECT u.user_id, ps.product_id, u.service_id, u.generation, u.created_at, u.reminder_sent_at
+                FROM test_service_usage u
+                JOIN user_services s ON s.id=u.service_id
+                JOIN package_settings ps ON ps.template_id=s.package_id
+                WHERE ps.product_id IS NOT NULL''')
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_test_product_reminders ON test_service_product_usage(generation, reminder_sent_at, created_at)')
 
         # --- Receipt tracking extensions ---
         conn.execute('''CREATE TABLE IF NOT EXISTS card_receipts (
@@ -1849,9 +1868,16 @@ def current_test_generation() -> int:
     return int(get_setting('test_service_generation', 1) or 1)
 
 
-def test_service_eligibility(user_id: int, cooldown_days: int | None = None) -> tuple[bool, int]:
+def test_service_scope() -> str:
+    return 'per_product' if get_setting('test_service_scope', 'global') == 'per_product' else 'global'
+
+
+def test_service_eligibility(user_id: int, cooldown_days: int | None = None, product_id: int | None = None) -> tuple[bool, int]:
     """Return (eligible_now, remaining_seconds). Generation reset always grants access immediately."""
-    row = fetchone('SELECT generation, created_at FROM test_service_usage WHERE user_id=?', (int(user_id),))
+    if test_service_scope() == 'per_product' and product_id is not None:
+        row = fetchone('SELECT generation, created_at FROM test_service_product_usage WHERE user_id=? AND product_id=?', (int(user_id), int(product_id)))
+    else:
+        row = fetchone('SELECT generation, created_at FROM test_service_usage WHERE user_id=?', (int(user_id),))
     if not row or int(row.get('generation') or 0) < current_test_generation():
         return True, 0
     if cooldown_days is None:
@@ -1873,20 +1899,31 @@ def user_has_used_current_test(user_id: int) -> bool:
     return not eligible
 
 
-def mark_test_used(user_id: int, service_id: int | None = None) -> None:
-    execute(
-        """INSERT INTO test_service_usage (user_id, service_id, generation, created_at, reminder_sent_at) VALUES (?, ?, ?, ?, NULL)
-           ON CONFLICT(user_id) DO UPDATE SET service_id=excluded.service_id, generation=excluded.generation, created_at=excluded.created_at, reminder_sent_at=NULL""",
-        (int(user_id), service_id, current_test_generation(), now_iso()),
-    )
+def mark_test_used(user_id: int, service_id: int | None = None, product_id: int | None = None) -> None:
+    generation, used_at = current_test_generation(), now_iso()
+    with connect() as conn:
+        conn.execute(
+            """INSERT INTO test_service_usage (user_id, service_id, generation, created_at, reminder_sent_at) VALUES (?, ?, ?, ?, NULL)
+               ON CONFLICT(user_id) DO UPDATE SET service_id=excluded.service_id, generation=excluded.generation, created_at=excluded.created_at, reminder_sent_at=NULL""",
+            (int(user_id), service_id, generation, used_at),
+        )
+        if product_id is not None:
+            conn.execute(
+                """INSERT INTO test_service_product_usage (user_id, product_id, service_id, generation, created_at, reminder_sent_at)
+                   VALUES (?, ?, ?, ?, ?, NULL)
+                   ON CONFLICT(user_id, product_id) DO UPDATE SET service_id=excluded.service_id, generation=excluded.generation,
+                       created_at=excluded.created_at, reminder_sent_at=NULL""",
+                (int(user_id), int(product_id), service_id, generation, used_at),
+            )
 
 
 def due_test_service_reminders(cooldown_days: int, limit: int = 200) -> list[dict[str, Any]]:
     cooldown_days = int(cooldown_days)
     if cooldown_days <= 0:
         return []
+    table = 'test_service_product_usage' if test_service_scope() == 'per_product' else 'test_service_usage'
     return fetchall(
-        """SELECT * FROM test_service_usage
+        f"""SELECT * FROM {table}
            WHERE generation=?
              AND reminder_sent_at IS NULL
              AND datetime(created_at, '+' || ? || ' days') <= datetime('now')
@@ -1895,7 +1932,14 @@ def due_test_service_reminders(cooldown_days: int, limit: int = 200) -> list[dic
     )
 
 
-def mark_test_reminder_sent(user_id: int, created_at: str) -> None:
+def mark_test_reminder_sent(user_id: int, created_at: str, product_id: int | None = None) -> None:
+    if test_service_scope() == 'per_product' and product_id is not None:
+        execute(
+            """UPDATE test_service_product_usage SET reminder_sent_at=?
+               WHERE user_id=? AND product_id=? AND created_at=? AND reminder_sent_at IS NULL""",
+            (now_iso(), int(user_id), int(product_id), str(created_at)),
+        )
+        return
     execute(
         """UPDATE test_service_usage SET reminder_sent_at=?
            WHERE user_id=? AND created_at=? AND reminder_sent_at IS NULL""",

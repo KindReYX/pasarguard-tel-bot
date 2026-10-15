@@ -30,10 +30,12 @@ def test_admin_keyboard() -> InlineKeyboardMarkup:
     cooldown_days = int(db.get_setting('test_service_cooldown_days', 14) or 14)
     configured = db.fetchone('SELECT COUNT(*) AS c FROM product_test_templates') or {'c': 0}
     button_visible = customer_button_enabled('test_service')
+    scope_label = 'هر محصول مستقل' if db.test_service_scope() == 'per_product' else 'یک تست برای کل محصولات'
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"🧪 وضعیت سرویس تست: {'روشن' if enabled else 'خاموش'}", callback_data='test_admin:toggle')],
         [InlineKeyboardButton(text=f"👁 دکمه تست در منوی کاربر: {'نمایش' if button_visible else 'مخفی'}", callback_data='test_admin:toggle_button')],
         [InlineKeyboardButton(text=f"🛍 بسته تست محصولات ({configured['c']} تنظیم‌شده)", callback_data='test_admin:products')],
+        [InlineKeyboardButton(text=f'🎯 سهمیه تست: {scope_label}', callback_data='test_admin:scope')],
         [InlineKeyboardButton(text=f'⏳ دریافت مجدد بعد از {cooldown_days} روز', callback_data='test_admin:set_cooldown')],
         [InlineKeyboardButton(text='✏️ متن دکمه سرویس تست', callback_data='test_admin:set_button_text')],
         [InlineKeyboardButton(text='📝 متن صفحه اصلی سرویس تست', callback_data='test_admin:set_page_text')],
@@ -115,6 +117,31 @@ async def test_admin_toggle_button(callback: CallbackQuery):
     set_customer_button_enabled('test_service', not current)
     await edit_or_answer(callback, '🧪 تنظیمات بسته تست', reply_markup=test_admin_keyboard())
     await answer_callback(callback, 'نمایش دکمه تست تغییر کرد.')
+
+
+@test_service_router.callback_query(F.data == 'test_admin:scope')
+async def test_admin_scope(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await deny_callback(callback); return
+    rows = [
+        [InlineKeyboardButton(text='🔒 یک تست برای کل محصولات', callback_data='test_admin:scope_set:global')],
+        [InlineKeyboardButton(text='🛍 یک تست از هر محصول، مستقل از بقیه', callback_data='test_admin:scope_set:per_product')],
+        [InlineKeyboardButton(text='🔙 تنظیمات تست', callback_data='test_admin:home')],
+    ]
+    await edit_or_answer(callback, 'سهمیه دریافت تست را انتخاب کنید. در هر دو حالت، زمان دریافت مجدد طبق تنظیم روزهای انتظار محاسبه می‌شود. سوابق قبلی حفظ می‌شوند.', reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.answer()
+
+
+@test_service_router.callback_query(F.data.startswith('test_admin:scope_set:'))
+async def test_admin_scope_set(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await deny_callback(callback); return
+    scope = callback.data.rsplit(':', 1)[-1]
+    if scope not in {'global', 'per_product'}:
+        await callback.answer('گزینه نامعتبر است.', show_alert=True); return
+    db.set_setting('test_service_scope', scope)
+    await edit_or_answer(callback, 'تنظیم سهمیه تست ذخیره شد ✅', reply_markup=test_admin_keyboard())
+    await callback.answer()
 
 
 @test_service_router.callback_query(F.data == 'test_admin:products')

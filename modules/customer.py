@@ -314,18 +314,16 @@ async def send_config_delivery(message: Message, service: dict, config_link: str
                         BufferedInputFile(content, filename=filename),
                         caption='📄 فایل کانفیگ WireGuard',
                     )
-            else:
-                await message.answer('⚠️ فایل این کانفیگ وایرگارد در خروجی پنل پیدا نشد؛ لینک و QR ارسال شدند.')
         except Exception as exc:
             try:
                 db.record_system_error(
-                    'customer.send_wireguard_config', type(exc).__name__,
+                    'customer.send_wireguard_config',
+                    str(exc)[:300] if isinstance(exc, RuntimeError) else type(exc).__name__,
                     entity_type='service', entity_id=str(service.get('id') or ''),
                     error_type=type(exc).__name__,
                 )
             except Exception:
                 pass
-            await message.answer('⚠️ ارسال فایل وایرگارد ناموفق بود؛ لینک و QR ارسال شدند.')
 
 
 def format_toman(amount: int | None) -> str:
@@ -396,61 +394,21 @@ def validate_customer_username(username: str) -> str:
 
 
 def build_panel_note_for_order(order: dict) -> str:
-    """Build panel note as '@username - ID_CODE' per user request.
-
-    - username: Telegram @username if available (from bot_users), otherwise customer_username (service username)
-    - ID_CODE: Telegram numeric ID (order['user_id'])
-    Replaces old 'Telegram order #XX' format.
-    """
-    user_id = order.get('user_id')
+    """Use the buyer's Telegram numeric ID as the panel note."""
     try:
-        user_id_int = int(user_id) if user_id is not None else 0
+        user_id = int(order.get('user_id') or 0)
     except Exception:
-        user_id_int = 0
-    customer_username = str(order.get('customer_username') or '').strip().lstrip('@')
-    tg_username: str | None = None
-    if user_id_int:
-        try:
-            row = db.fetchone('SELECT username FROM bot_users WHERE telegram_id=?', (user_id_int,))
-            if row and row.get('username'):
-                tg_username = str(row['username']).strip().lstrip('@')
-                if not tg_username:
-                    tg_username = None
-        except Exception:
-            tg_username = None
-    at_name = (tg_username or customer_username or '').strip().lstrip('@')
-    if at_name and user_id_int:
-        return f'@{at_name} - {user_id_int}'
-    if at_name:
-        return f'@{at_name}'
-    if user_id_int:
-        return str(user_id_int)
-    return 'unknown'
+        user_id = 0
+    return str(user_id) if user_id > 0 else 'unknown'
 
 
 def build_panel_note_for_test(user_id: int) -> str:
-    """Same '@username - ID_CODE' format for test services."""
+    """Use the Telegram numeric ID for test service notes too."""
     try:
         uid = int(user_id)
     except Exception:
         uid = 0
-    tg_username: str | None = None
-    if uid:
-        try:
-            row = db.fetchone('SELECT username FROM bot_users WHERE telegram_id=?', (uid,))
-            if row and row.get('username'):
-                tg_username = str(row['username']).strip().lstrip('@')
-                if not tg_username:
-                    tg_username = None
-        except Exception:
-            tg_username = None
-    if tg_username and uid:
-        return f'@{tg_username} - {uid}'
-    if tg_username:
-        return f'@{tg_username}'
-    if uid:
-        return str(uid)
-    return 'test'
+    return str(uid) if uid > 0 else 'test'
 
 
 def get_pack_meta(template_id: str) -> dict:
@@ -1242,7 +1200,16 @@ async def process_one_service_job(job: dict) -> tuple[bool, str]:
         if ok:
             db.mark_service_job_done(job_id)
             db.execute("UPDATE orders SET status='service_ready' WHERE id=?", (order_id,))
-            db.process_referral_purchase_reward(order_id)
+            try:
+                db.process_referral_purchase_reward(order_id)
+            except Exception as exc:
+                # Affiliate bookkeeping must not turn a successfully provisioned
+                # paid service into a failed service job. Record the failure for
+                # operators; wallet credits themselves remain transaction-safe.
+                db.record_system_error(
+                    'customer.referral_purchase_commission', str(exc),
+                    entity_type='order', entity_id=str(order_id), error_type=type(exc).__name__,
+                )
             return True, service_message
         raise RuntimeError(service_message)
     except Exception as exc:
@@ -2255,18 +2222,17 @@ async def customer_referral(message: Message, bot):
     user_id = message.from_user.id if message.from_user else None
     stats = db.referral_stats(user_id)
     me = await bot.get_me()
-    reward = db.referral_reward_amount()
-    condition = db.referral_condition()
-    condition_text = 'بعد از خرید موفق بسته' if condition == 'purchase' else 'بعد از ورود با لینک'
+    purchase_percent = db.referral_purchase_percent()
+    wallet_percent = db.referral_wallet_percent()
     link = f'https://t.me/{me.username}?start=ref_{user_id}'
     await message.answer(
         '👥 دعوت دوستان\n\n'
         f'لینک دعوت شما:\n{copy_code(link)}\n\n'
-        f'پاداش هر دعوت: {format_toman(reward)}\n'
-        f'شرط دریافت پاداش: {condition_text}\n\n'
+        f'درآمد از خرید موفق دوستان: {purchase_percent:g}%\n'
+        f'درآمد از شارژ کیف پول دوستان: {wallet_percent:g}%\n\n'
         f'کل دعوت ها: {copy_code(stats["total"])}\n'
-        f'پاداش داده شده: {copy_code(stats["rewarded"])}\n'
-        f'در انتظار: {copy_code(stats["pending"])}',
+        f'دعوت‌های دارای پاداش: {copy_code(stats["rewarded"])}\n'
+        f'درآمد کل: {format_toman(stats.get("total_earned", 0))}',
         reply_markup=customer_keyboard(),
         parse_mode='Markdown',
     )

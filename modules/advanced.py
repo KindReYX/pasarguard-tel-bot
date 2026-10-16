@@ -111,7 +111,7 @@ SETTINGS: list[SettingItem] = [
     SettingItem('support_button_text', 'متن دکمه پشتیبانی', 'texts', 'text', '🎫 پشتیبانی', 'ایموجی پریمیوم: خود ایموجی را مستقیم بفرستید یا [CUSTOM_EMOJI_ID] متن دکمه'),
     SettingItem('rules_button_text', 'متن دکمه قوانین', 'texts', 'text', '📜 قوانین', 'ایموجی پریمیوم: خود ایموجی را مستقیم بفرستید یا [CUSTOM_EMOJI_ID] متن دکمه'),
     SettingItem('package_username_prompt_text', 'متن بعد از انتخاب بسته / دریافت نام سرویس', 'general_texts', 'text', '📦 بسته انتخابی: {package_name}\n\nلطفا نام کاربری سرویس را ارسال کنید.\n\n⚠️ نام کاربری باید بدون کاراکترهای اضافه مانند @ ، فاصله ، خط تیره باشد.\n⚠️ نام کاربری باید انگلیسی باشد.\n✅ نام کاربری های صحیح: ali12 | mahdi | ws1_ksdf\n❌ نام کاربری های نادرست: ali_ | tele@ | _mahdi | محسن', 'متغیرها: {product_id} {product_name} {product_public_price_per_gb} {product_public_price_per_gb_raw} {custom_volume_gb} {custom_months} {custom_users} {package_name} {package_id} {package_price} {package_price_raw} {package_data_limit} {package_data_limit_raw} {package_duration} {package_duration_seconds} {username_prefix} {username_suffix} {hwid_limit} {package_status} {price} {price_raw} {data_limit} {data_limit_raw} {duration} {duration_seconds} {name} {first_name} {username} {user_id} {support}'),
-    SettingItem('referral_text', 'متن صفحه دعوت دوستان', 'general_texts', 'text', '👥 دعوت دوستان\n\nلینک دعوت شما:\n{referral_link}\n\nپاداش هر دعوت: {reward}\nشرط دریافت پاداش: {condition}\n\nکل دعوت ها: {total}\nپاداش داده شده: {rewarded}\nدر انتظار: {pending}', 'متغیرها: {name} {first_name} {username} {user_id} {ref_link} {referral_link} {reward} {reward_raw} {condition} {total} {rewarded} {pending} {support}'),
+    SettingItem('referral_text', 'متن صفحه دعوت دوستان', 'general_texts', 'text', '👥 دعوت دوستان\n\nلینک دعوت شما:\n{referral_link}\n\nدرآمد از خرید دوستان: {purchase_percent}%\nدرآمد از شارژ کیف پول دوستان: {wallet_percent}%\n\nکل دعوت ها: {total}\nدعوت‌های دارای پاداش: {rewarded}\nدرآمد کل: {earned}', 'متغیرها: {name} {first_name} {username} {user_id} {ref_link} {referral_link} {reward} {reward_raw} {condition} {purchase_percent} {wallet_percent} {total} {rewarded} {pending} {earned} {support}'),
     SettingItem('invoice_text', 'قالب فاکتور خرید', 'general_texts', 'text', '🧾 فاکتور خرید\n\nشماره سفارش: {order_id}\nآیدی عددی کاربر: {user_id}\nمحصول: {product_name}\nنام بسته: {package_name}\nنام سرویس: {service_name}\nمبلغ اصلی: {price}\nتخفیف: {discount}\nکیف پول مصرف شده: {wallet_used}\nمبلغ قابل پرداخت: {payable}\nپرداخت Stars: {stars} ⭐️\nوضعیت سفارش: {status}\nتاریخ: {created_at}\n{service_message}', 'متغیرها: {order_id} {user_id} {product_id} {product_name} {product_public_price_per_gb} {product_public_price_per_gb_raw} {custom_volume_gb} {custom_months} {custom_users} {package_id} {package_name} {service_name} {price} {price_raw} {amount} {discount} {discount_raw} {wallet_used} {wallet_used_raw} {payable} {payable_raw} {stars} {status} {created_at} {service_message} {sub_link}'),
     SettingItem('service_ready_text', 'متن آماده شدن سرویس', 'general_texts', hint='متغیرها: {name} {user_id} {order_id} {product_id} {product_name} {product_public_price_per_gb} {product_public_price_per_gb_raw} {custom_volume_gb} {custom_months} {custom_users} {package_name} {service_name} {price} {sub_link} {support}'),
     SettingItem('service_detail_text', 'قالب جزئیات/وضعیت سرویس', 'general_texts', 'text', '🔗 {sub_link}\n📊 وضعیت سرویس : {status}\n👤 نام سرویس : {service_name}\n\n🌍 موقعیت سرویس : 🌟 پلن حجمی\n🛍 محصول : {product_name}\n📦 بسته : {package_name}\n🧾 شماره سفارش : {order_id}\n🗓 تاریخ خرید : {purchase_date}\n\n🔋 ترافیک : {data_limit}\n📥 حجم مصرفی : {used_traffic}\n💢 حجم باقی مانده : {remaining_traffic} ({remaining_percent}%)\n\n📅 تاریخ اتمام : {expire_at} ({expire_remaining})\n\n📶 آخرین زمان اتصال : {last_online}\n🔄 آخرین زمان آپدیت لینک اشتراک : {subscription_updated}\n#️⃣ کلاینت متصل شده : {client}', 'متغیرها: {sub_link} {status} {service_name} {product_id} {product_name} {product_public_price_per_gb} {product_public_price_per_gb_raw} {custom_volume_gb} {custom_months} {custom_users} {package_name} {order_id} {purchase_date} {data_limit} {used_traffic} {remaining_traffic} {remaining_percent} {expire_at} {expire_remaining} {last_online} {subscription_updated} {client}'),
@@ -189,8 +189,8 @@ SETTINGS: list[SettingItem] = [
 
     # Wallet/referral/test
     SettingItem('wallet_min_charge_toman', 'حداقل شارژ کیف پول به تومان', 'wallet', 'int', 10000),
-    SettingItem('referral_reward_toman', 'مبلغ پاداش دعوت به تومان', 'referral', 'int', 0),
-    SettingItem('referral_condition', 'شرط پاداش دعوت', 'referral', 'text', 'purchase', 'join = ورود با لینک | purchase = بعد از خرید موفق بسته'),
+    SettingItem('referral_purchase_percent', 'درصد پاداش دعوت از هر خرید موفق', 'referral', 'float', 0, '۰ تا ۱۰۰؛ درصد از مبلغ نهایی سفارش، پس از آماده‌شدن سرویس.'),
+    SettingItem('referral_wallet_percent', 'درصد پاداش دعوت از هر شارژ کیف پول', 'referral', 'float', 0, '۰ تا ۱۰۰؛ درصد از مبلغ شارژ پرداخت‌شده.'),
     SettingItem('renewal_mode', 'نحوه اعمال تمدید', 'renewal', 'text', 'add', 'add = افزودن زمان/حجم باقی‌مانده | replace = جایگزینی و سوزاندن باقی‌مانده'),
     SettingItem('github_auto_check_enabled', 'چک خودکار آپدیت هر 24 ساعت', 'updates', 'bool', True, 'اگر خاموش باشد، فقط با دکمه «بررسی آپدیت همین الان» GitHub بررسی می‌شود.'),
     SettingItem('github_auto_update_enabled', 'نصب خودکار آپدیت', 'updates', 'bool', False, 'اگر روشن باشد و چک خودکار هم روشن باشد، Release جدید بعد از شناسایی به صورت خودکار نصب می‌شود.'),
@@ -261,6 +261,8 @@ def _parse_value(item: SettingItem, raw: str) -> Any:
             raise ValueError('لطفا عدد وارد کنید. مثال: 5.01') from exc
         if value < 0:
             raise ValueError('عدد منفی مجاز نیست.')
+        if item.key in {'referral_purchase_percent', 'referral_wallet_percent'} and not 0 <= value <= 100:
+            raise ValueError('درصد پاداش باید بین ۰ تا ۱۰۰ باشد.')
         return value
     if item.value_type == 'bool':
         lowered = raw.lower()
@@ -289,7 +291,7 @@ def category_keyboard(group: str) -> InlineKeyboardMarkup:
         ])
     rows = []
     if group == 'updates':
-        rows.append([InlineKeyboardButton(text='🔄 بررسی آپدیت همین الان', callback_data='ghupd:check')])
+        rows.append([InlineKeyboardButton(text='📚 همه نسخه‌ها، نصب و بازگشت', callback_data='ghupd:check')])
     for item in SETTINGS:
         if item.group != group:
             continue

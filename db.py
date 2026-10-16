@@ -307,6 +307,24 @@ def init_db() -> None:
                 rewarded_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS referral_commissions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                inviter_id INTEGER NOT NULL,
+                invited_id INTEGER NOT NULL,
+                base_amount INTEGER NOT NULL DEFAULT 0,
+                percent REAL NOT NULL DEFAULT 0,
+                reward_amount INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                notified_at TEXT,
+                notification_attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                UNIQUE(event_type, event_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_referral_commissions_pending
+                ON referral_commissions(notified_at, notification_attempts, id);
+
             CREATE TABLE IF NOT EXISTS wallet_charge_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -1221,6 +1239,8 @@ def _campaign_bonus_for_request(req: dict[str, Any], conn: sqlite3.Connection) -
 
 def mark_wallet_charge_paid_provider(request_id: int, method: str, provider_payment_charge_id: str | None = None, raw: Any = None) -> bool:
     """Atomically mark a wallet charge paid and credit base+campaign bonus exactly once."""
+    referral_percent = referral_wallet_percent()
+    referral_enabled = bool(get_setting('referral_enabled', True))
     with connect() as conn:
         conn.execute('BEGIN IMMEDIATE')
         row = conn.execute('SELECT * FROM wallet_charge_requests WHERE id=?', (int(request_id),)).fetchone()
@@ -1245,6 +1265,12 @@ def mark_wallet_charge_paid_provider(request_id: int, method: str, provider_paym
             conn.execute('INSERT INTO wallet_transactions (user_id, admin_id, amount, reason, created_at) VALUES (?, NULL, ?, ?, ?)',
                          (int(req['user_id']), bonus, f'بونوس کمپین شارژ #{int(req.get("campaign_id") or 0)} برای درخواست #{request_id}', now_iso()))
         conn.execute('UPDATE wallet_charge_requests SET campaign_bonus_applied=1, campaign_bonus_amount=? WHERE id=?', (bonus, int(request_id)))
+        if referral_percent > 0 and referral_enabled:
+            _award_referral_commission(
+                conn, invited_id=int(req['user_id']), event_type='wallet_charge',
+                event_id=str(request_id), base_amount=int(req['amount_toman'] or 0),
+                percent=referral_percent,
+            )
         conn.commit()
         return True
 
@@ -1556,15 +1582,67 @@ def add_wallet_transaction(user_id: int, amount: int, reason: str = '', admin_id
     )
 
 
+def _referral_percent_setting(key: str) -> float:
+    try:
+        return min(100.0, max(0.0, float(get_setting(key, 0) or 0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def referral_purchase_percent() -> float:
+    return _referral_percent_setting('referral_purchase_percent')
+
+
+def referral_wallet_percent() -> float:
+    return _referral_percent_setting('referral_wallet_percent')
+
+
+def _award_referral_commission(
+    conn: sqlite3.Connection, *, invited_id: int, event_type: str,
+    event_id: str, base_amount: int, percent: float,
+) -> dict[str, Any] | None:
+    """Record one commission and credit only the inviter, in the caller's transaction."""
+    base_amount = max(0, int(base_amount or 0))
+    percent = min(100.0, max(0.0, float(percent or 0)))
+    if base_amount <= 0 or percent <= 0:
+        return None
+    referral = conn.execute(
+        'SELECT inviter_id FROM referrals WHERE invited_id=?', (int(invited_id),)
+    ).fetchone()
+    if not referral or int(referral['inviter_id']) == int(invited_id):
+        return None
+    reward = max(0, int(round(base_amount * percent / 100.0)))
+    cur = conn.execute(
+        '''INSERT OR IGNORE INTO referral_commissions
+           (event_type,event_id,inviter_id,invited_id,base_amount,percent,reward_amount,created_at)
+           VALUES (?,?,?,?,?,?,?,?)''',
+        (str(event_type), str(event_id), int(referral['inviter_id']), int(invited_id),
+         base_amount, percent, reward, now_iso()),
+    )
+    if cur.rowcount != 1:
+        return None
+    commission_id = int(cur.lastrowid)
+    if reward > 0:
+        conn.execute(
+            'INSERT INTO wallet_transactions (user_id,admin_id,amount,reason,created_at) VALUES (?,NULL,?,?,?)',
+            (int(referral['inviter_id']), reward,
+             f'پاداش دعوت {event_type} کاربر {int(invited_id)} ({percent:g}%)', now_iso()),
+        )
+    return {
+        'id': commission_id, 'event_type': str(event_type), 'event_id': str(event_id),
+        'inviter_id': int(referral['inviter_id']), 'invited_id': int(invited_id),
+        'base_amount': base_amount, 'percent': percent, 'reward_amount': reward,
+    }
+
+
 def create_referral(inviter_id: int, invited_id: int) -> bool:
     if int(inviter_id) == int(invited_id):
         return False
     if fetchone('SELECT id FROM referrals WHERE invited_id=?', (int(invited_id),)):
         return False
-    reward = referral_reward_amount()
     execute(
         'INSERT INTO referrals (inviter_id, invited_id, status, reward_amount, reward_paid, created_at) VALUES (?, ?, ?, ?, 0, ?)',
-        (int(inviter_id), int(invited_id), 'pending', reward, now_iso()),
+        (int(inviter_id), int(invited_id), 'pending', 0, now_iso()),
     )
     return True
 
@@ -1582,64 +1660,64 @@ def referral_reward_amount() -> int:
 
 
 def process_referral_reward(invited_id: int, reason: str = 'join', order_id: int | None = None) -> bool:
-    """Credit only the inviter wallet, exactly once, when the rule is satisfied."""
-    if not bool(get_setting('referral_enabled', True)):
-        return False
-    required = referral_condition()
-    normalized_reason = 'purchase' if reason in {'payment', 'purchase'} else 'join'
-    if required != normalized_reason:
-        return False
-
-    with connect() as conn:
-        conn.execute('BEGIN IMMEDIATE')
-        row = conn.execute('SELECT * FROM referrals WHERE invited_id=? AND reward_paid=0', (int(invited_id),)).fetchone()
-        if not row:
-            conn.rollback()
-            return False
-        if normalized_reason == 'purchase':
-            if not order_id:
-                conn.rollback()
-                return False
-            order_row = conn.execute('SELECT * FROM orders WHERE id=? AND user_id=?', (int(order_id), int(invited_id))).fetchone()
-            if not order_row:
-                conn.rollback()
-                return False
-            order = dict(order_row)
-            if str(order.get('status') or '') != 'service_ready':
-                conn.rollback()
-                return False
-            if str(order.get('order_type') or 'new') not in {'new', 'renew'}:
-                conn.rollback()
-                return False
-        amount = int(row['reward_amount'] or referral_reward_amount() or 0)
-        if amount > 0:
-            conn.execute(
-                'INSERT INTO wallet_transactions (user_id, admin_id, amount, reason, created_at) VALUES (?, NULL, ?, ?, ?)',
-                (int(row['inviter_id']), amount, f'پاداش دعوت کاربر {int(invited_id)}', now_iso()),
-            )
-            status = 'rewarded'
-        else:
-            status = 'done_no_reward'
-        conn.execute(
-            'UPDATE referrals SET status=?, reward_paid=1, rewarded_at=?, reward_order_id=?, reward_reason=? WHERE id=? AND reward_paid=0',
-            (status, now_iso(), int(order_id) if order_id else None, normalized_reason, int(row['id'])),
-        )
-        conn.commit()
-        return True
+    """Legacy fixed referral rewards are disabled; commissions are event based."""
+    return False
 
 
 def process_referral_purchase_reward(order_id: int) -> bool:
-    order = get_order(int(order_id))
-    if not order:
+    percent = referral_purchase_percent()
+    if percent <= 0 or not bool(get_setting('referral_enabled', True)):
         return False
-    return process_referral_reward(int(order['user_id']), reason='purchase', order_id=int(order_id))
+    with connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        row = conn.execute('SELECT * FROM orders WHERE id=?', (int(order_id),)).fetchone()
+        if not row:
+            conn.rollback()
+            return False
+        order = dict(row)
+        if (str(order.get('status') or '') != 'service_ready'
+                or str(order.get('order_type') or 'new') not in {'new', 'renew'}):
+            conn.rollback()
+            return False
+        commission = _award_referral_commission(
+            conn, invited_id=int(order.get('user_id') or 0), event_type='purchase',
+            event_id=str(int(order_id)), base_amount=int(order.get('amount_toman') or 0),
+            percent=percent,
+        )
+        conn.commit()
+        return bool(commission and commission['reward_amount'] > 0)
+
+
+def pending_referral_commissions(limit: int = 20) -> list[dict[str, Any]]:
+    return fetchall(
+        '''SELECT * FROM referral_commissions
+           WHERE reward_amount>0 AND notified_at IS NULL AND notification_attempts<5
+           ORDER BY id LIMIT ?''', (max(1, min(100, int(limit))),)
+    )
+
+
+def mark_referral_commission_notified(commission_id: int) -> None:
+    execute('UPDATE referral_commissions SET notified_at=?, last_error=NULL WHERE id=? AND notified_at IS NULL',
+            (now_iso(), int(commission_id)))
+
+
+def mark_referral_commission_notification_failed(commission_id: int, error: str) -> None:
+    execute('''UPDATE referral_commissions SET notification_attempts=notification_attempts+1,
+               last_error=? WHERE id=? AND notified_at IS NULL''', (str(error)[:500], int(commission_id)))
 
 
 def referral_stats(user_id: int) -> dict[str, int]:
     total = fetchone('SELECT COUNT(*) AS c FROM referrals WHERE inviter_id=?', (int(user_id),))
-    rewarded = fetchone('SELECT COUNT(*) AS c FROM referrals WHERE inviter_id=? AND reward_paid=1', (int(user_id),))
-    pending = fetchone('SELECT COUNT(*) AS c FROM referrals WHERE inviter_id=? AND reward_paid=0', (int(user_id),))
-    return {'total': int(total['c'] if total else 0), 'rewarded': int(rewarded['c'] if rewarded else 0), 'pending': int(pending['c'] if pending else 0)}
+    rewarded = fetchone('SELECT COUNT(DISTINCT invited_id) AS c FROM referral_commissions WHERE inviter_id=? AND reward_amount>0', (int(user_id),))
+    pending = fetchone('''SELECT COUNT(*) AS c FROM referrals r WHERE r.inviter_id=?
+                          AND NOT EXISTS (SELECT 1 FROM referral_commissions c WHERE c.invited_id=r.invited_id AND c.reward_amount>0)''', (int(user_id),))
+    earned = fetchone('SELECT COALESCE(SUM(reward_amount),0) AS s FROM referral_commissions WHERE inviter_id=?', (int(user_id),))
+    return {
+        'total': int(total['c'] if total else 0),
+        'rewarded': int(rewarded['c'] if rewarded else 0),
+        'pending': int(pending['c'] if pending else 0),
+        'total_earned': int(earned['s'] if earned else 0),
+    }
 
 
 # Override earlier add_notification so admin can disable notifications globally.

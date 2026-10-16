@@ -42,6 +42,7 @@ def start_background_tasks(bot: Bot) -> None:
     asyncio.create_task(test_service_reminder_loop(bot))
     asyncio.create_task(navasan_rate_loop())
     asyncio.create_task(receipt_delivery_retry_loop(bot))
+    asyncio.create_task(referral_commission_notification_loop(bot))
     from modules.updater import github_update_loop
     asyncio.create_task(github_update_loop(bot))
 
@@ -60,6 +61,17 @@ async def receipt_delivery_retry_loop(bot: Bot) -> None:
         except Exception as exc:
             db.record_system_error('tasks.receipt_delivery_retry_loop', str(exc), error_type=type(exc).__name__)
         await asyncio.sleep(45)
+
+
+async def referral_commission_notification_loop(bot: Bot) -> None:
+    """Send purchase/top-up commission messages from the durable DB outbox."""
+    while True:
+        try:
+            from modules.referral import notify_pending_referral_commissions
+            await notify_pending_referral_commissions(bot, limit=20)
+        except Exception as exc:
+            db.record_system_error('tasks.referral_commission_notification_loop', str(exc), error_type=type(exc).__name__)
+        await asyncio.sleep(15)
 
 async def service_job_loop() -> None:
     while True:

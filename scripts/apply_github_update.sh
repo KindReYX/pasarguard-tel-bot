@@ -7,6 +7,8 @@ SERVICE_USER="${SERVICE_USER:?SERVICE_USER is required}"
 TAG="${1:-}"
 STATUS_FILE="$PROJECT_DIR/.update_status.json"
 PROGRESS_FILE="$PROJECT_DIR/.update_progress.json"
+WORKER_INSTALL_PATH="${WORKER_INSTALL_PATH:-/usr/local/libexec/pasarguard-apply-update}"
+LAUNCHER_INSTALL_PATH="${LAUNCHER_INSTALL_PATH:-/usr/local/sbin/pasarguard-bot-update}"
 
 if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "Invalid release tag: $TAG" >&2
@@ -75,6 +77,23 @@ esac
 OLD_SHA="$(run_as_service git -C "$PROJECT_DIR" rev-parse HEAD)"
 write_progress starting 5
 
+# Resolve the exact published tag before stopping the running bot. A local
+# stale tag must never be treated as a release that still exists on origin.
+write_progress fetch 30
+if ! run_as_service git -C "$PROJECT_DIR" ls-remote --exit-code origin "refs/tags/$TAG" >/dev/null ||
+   ! run_as_service git -C "$PROJECT_DIR" fetch --force origin "refs/tags/$TAG:refs/tags/$TAG" ||
+   ! run_as_service git -C "$PROJECT_DIR" rev-parse -q --verify "refs/tags/$TAG^{commit}" >/dev/null; then
+  write_progress failed 100 "Release tag is unavailable on origin"
+  write_status failed "Release tag is unavailable on origin"
+  exit 6
+fi
+TARGET_SHA="$(run_as_service git -C "$PROJECT_DIR" rev-parse "refs/tags/$TAG^{commit}")"
+if [ "$TARGET_SHA" = "$OLD_SHA" ]; then
+  write_progress success 100
+  write_status success "Already on requested release"
+  exit 0
+fi
+
 # Back up the live DB before touching code or schema. Keep the exact backup path
 # so a failed migration can restore both code and data atomically.
 write_progress backup 15
@@ -90,14 +109,28 @@ if [ -n "$BACKUP_PATH" ] && [ ! -f "$BACKUP_PATH" ]; then BACKUP_PATH=""; fi
 WAS_ACTIVE=0
 if systemctl is-active --quiet "$SERVICE_NAME"; then WAS_ACTIVE=1; fi
 write_progress stop 22
-systemctl stop "$SERVICE_NAME" || true
 UPDATE_FINISHED=0
+CODE_CHANGED=0
 emergency_cleanup() {
-  if [ "$UPDATE_FINISHED" -eq 0 ] && [ "$WAS_ACTIVE" -eq 1 ] && ! systemctl is-active --quiet "$SERVICE_NAME"; then
-    systemctl start "$SERVICE_NAME" >/dev/null 2>&1 || true
+  if [ "$UPDATE_FINISHED" -eq 0 ]; then
+    trap - EXIT
+    if [ "$CODE_CHANGED" -eq 1 ]; then
+      run_as_service git -C "$PROJECT_DIR" reset --hard "$OLD_SHA" >/dev/null 2>&1 || true
+      restore_database_backup >/dev/null 2>&1 || true
+    fi
+    local detail="Update interrupted; previous code and database restored"
+    if [ "$WAS_ACTIVE" -eq 1 ]; then
+      systemctl start "$SERVICE_NAME" >/dev/null 2>&1 || true
+      if ! systemctl is-active --quiet "$SERVICE_NAME"; then
+        detail="$detail; service restart failed - manual intervention required"
+      fi
+    fi
+    write_progress failed 100 "$detail" || true
+    write_status failed "$detail" || true
   fi
 }
 trap emergency_cleanup EXIT
+systemctl stop "$SERVICE_NAME"
 
 restore_database_backup() {
   [ -n "${BACKUP_PATH:-}" ] || return 0
@@ -116,21 +149,8 @@ PYRESTORE
   chown "$SERVICE_USER:$(id -gn "$SERVICE_USER")" "$db_path" 2>/dev/null || true
 }
 
-write_progress fetch 30
-run_as_service git -C "$PROJECT_DIR" fetch --tags --force origin
-if ! run_as_service git -C "$PROJECT_DIR" rev-parse -q --verify "refs/tags/$TAG^{commit}" >/dev/null; then
-  echo "Release tag does not exist on origin: $TAG" >&2
-  exit 6
-fi
-TARGET_SHA="$(run_as_service git -C "$PROJECT_DIR" rev-parse "refs/tags/$TAG^{commit}")"
-if [ "$TARGET_SHA" = "$OLD_SHA" ]; then
-  if [ "$WAS_ACTIVE" -eq 1 ]; then systemctl start "$SERVICE_NAME" || true; fi
-  UPDATE_FINISHED=1
-  write_status success "Already on requested release"
-  exit 0
-fi
-
 write_progress checkout 45
+CODE_CHANGED=1
 run_as_service git -C "$PROJECT_DIR" reset --hard "$TAG"
 write_progress verify 55
 EXPECTED_VERSION="${TAG#v}"
@@ -145,7 +165,11 @@ if [ "$ACTUAL_VERSION" != "$EXPECTED_VERSION" ]; then
   restore_database_backup || true
   if [ "$WAS_ACTIVE" -eq 1 ]; then systemctl start "$SERVICE_NAME" || true; fi
   UPDATE_FINISHED=1
-  write_status failed "version.py does not match release tag"
+  if [ "$WAS_ACTIVE" -eq 1 ] && ! systemctl is-active --quiet "$SERVICE_NAME"; then
+    write_status failed "version.py mismatch; previous version restored but service restart failed"
+  else
+    write_status failed "version.py does not match release tag; previous version restored"
+  fi
   echo "version.py ($ACTUAL_VERSION) does not match $TAG" >&2
   exit 7
 fi
@@ -153,8 +177,8 @@ fi
 refresh_update_helpers() {
   # Keep the root-owned launcher/worker in sync with the checked-out release.
   # This matters because these files live outside the git worktree.
-  install -o root -g root -m 0755 "$PROJECT_DIR/scripts/apply_github_update.sh" /usr/local/libexec/pasarguard-apply-update
-  cat > /usr/local/sbin/pasarguard-bot-update <<EOFHELPER
+  install -o root -g root -m 0755 "$PROJECT_DIR/scripts/apply_github_update.sh" "$WORKER_INSTALL_PATH"
+  cat > "$LAUNCHER_INSTALL_PATH" <<EOFHELPER
 #!/usr/bin/env bash
 set -euo pipefail
 TAG="\${1:-}"
@@ -165,10 +189,10 @@ SERVICE_USER='$SERVICE_USER'
 UNIT="pasarguard-bot-update-\$(date +%s)"
 exec systemd-run --no-block --quiet --unit="\$UNIT" --collect --property=Type=oneshot \
   --setenv=PROJECT_DIR="\$PROJECT_DIR" --setenv=SERVICE_NAME="\$SERVICE_NAME" --setenv=SERVICE_USER="\$SERVICE_USER" \
-  /usr/local/libexec/pasarguard-apply-update "\$TAG"
+  '$WORKER_INSTALL_PATH' "\$TAG"
 EOFHELPER
-  chmod 0755 /usr/local/sbin/pasarguard-bot-update
-  chown root:root /usr/local/sbin/pasarguard-bot-update /usr/local/libexec/pasarguard-apply-update
+  chmod 0755 "$LAUNCHER_INSTALL_PATH"
+  chown root:root "$LAUNCHER_INSTALL_PATH" "$WORKER_INSTALL_PATH"
 }
 
 refresh_update_helpers || {

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import re
 import zipfile
 from pathlib import PurePosixPath
@@ -77,19 +78,60 @@ def config_from_archive(archive: bytes, link: str) -> bytes | None:
     return matches[0] if len(matches) == 1 else None
 
 
+def config_from_response(body: bytes, link: str) -> bytes | None:
+    """The panel's wireguard subscription can be a .conf, JSON, or ZIP."""
+    if _valid_config(body):
+        return body
+    zipped = config_from_archive(body, link)
+    if zipped:
+        return zipped
+    try:
+        value = json.loads(body.decode('utf-8-sig'))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if isinstance(value, str):
+        raw = value.encode('utf-8')
+        return raw if _valid_config(raw) else None
+    if isinstance(value, dict):
+        # A single config wrapped in a JSON response is safe to identify.
+        for key in ('config', 'content', 'wireguard', 'raw'):
+            raw = value.get(key)
+            if isinstance(raw, str) and _valid_config(raw.encode('utf-8')):
+                return raw.encode('utf-8')
+    return None
+
+
+def wireguard_subscription_url(subscription_url: str | None) -> str | None:
+    url = urlsplit(str(subscription_url or '').strip())
+    if url.scheme not in {'http', 'https'} or not url.netloc:
+        return None
+    path = url.path.rstrip('/')
+    # OpenAPI: GET /sub/{token}/{client_type}; the saved URL may already
+    # contain a format suffix, including /wireguard itself.
+    formats = {'links', 'links_base64', 'xray', 'wireguard', 'sing_box', 'clash',
+               'clash_meta', 'outline', 'block', 'raw', 'apps', 'info', 'usage'}
+    if path.rsplit('/', 1)[-1] in formats and '/sub/' in path:
+        path = path.rsplit('/', 1)[0]
+    return urlunsplit((url.scheme, url.netloc, path + '/wireguard', url.query, ''))
+
+
 async def get_wireguard_config(link: str, subscription_url: str | None) -> bytes | None:
     embedded = config_from_link(link)
     if embedded:
         return embedded
-    url = urlsplit(str(subscription_url or '').strip())
-    if not is_wireguard_link(link) or url.scheme not in {'http', 'https'} or not url.netloc:
+    wireguard_url = wireguard_subscription_url(subscription_url)
+    if not is_wireguard_link(link) or not wireguard_url:
         return None
-    wireguard_url = urlunsplit((url.scheme, url.netloc, url.path.rstrip('/') + '/wireguard', url.query, ''))
     session = await api_client.get_shared_session()
-    async with session.get(wireguard_url, timeout=aiohttp.ClientTimeout(total=30)) as response:
+    async with session.get(wireguard_url, timeout=aiohttp.ClientTimeout(total=30), headers={'Accept': '*/*'}) as response:
         if response.status != 200:
-            return None
+            raise RuntimeError(f'WireGuard subscription returned HTTP {response.status}')
         if response.content_length is not None and response.content_length > MAX_ARCHIVE_BYTES:
-            return None
-        archive = await response.content.read(MAX_ARCHIVE_BYTES + 1)
-    return config_from_archive(archive, link) if len(archive) <= MAX_ARCHIVE_BYTES else None
+            raise RuntimeError('WireGuard subscription response exceeds size limit')
+        body = await response.content.read(MAX_ARCHIVE_BYTES + 1)
+    if len(body) > MAX_ARCHIVE_BYTES:
+        raise RuntimeError('WireGuard subscription response exceeds size limit')
+    config = config_from_response(body, link)
+    if not config:
+        raise RuntimeError('WireGuard subscription response is not a valid .conf, JSON config, or ZIP')
+    return config

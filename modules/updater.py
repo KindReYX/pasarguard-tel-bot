@@ -20,12 +20,14 @@ from version import __version__
 updater_router = Router()
 GITHUB_REPO = "KindReYX/pasarguard-tel-bot"
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+GITHUB_RELEASES_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
 CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 LOOP_INTERVAL_SECONDS = 60
 UPDATE_HELPER = "/usr/local/sbin/pasarguard-bot-update"
 STATUS_FILE = Path(__file__).resolve().parents[1] / ".update_status.json"
 PROGRESS_FILE = Path(__file__).resolve().parents[1] / ".update_progress.json"
 _SEMVER_RE = re.compile(r"^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+VERSIONS_PER_PAGE = 8
 
 
 def normalize_version(value: str) -> str:
@@ -60,6 +62,36 @@ def _release_keyboard(tag: str, html_url: str = "") -> InlineKeyboardMarkup:
     if html_url.startswith("https://github.com/"):
         rows.append([InlineKeyboardButton(text="📝 مشاهده Release", url=html_url)])
     rows.append([InlineKeyboardButton(text="🔄 بررسی دوباره", callback_data="ghupd:check")])
+    rows.append([InlineKeyboardButton(text="📚 همه نسخه‌ها و بازگشت", callback_data="ghupd:versions:0")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _published_release(data: Any) -> bool:
+    if not isinstance(data, dict) or data.get("draft") or not data.get("published_at"):
+        return False
+    try:
+        normalize_version(str(data.get("tag_name") or ""))
+        return True
+    except ValueError:
+        return False
+
+
+def _versions_keyboard(releases: list[dict[str, Any]], page: int) -> InlineKeyboardMarkup:
+    start = page * VERSIONS_PER_PAGE
+    rows = []
+    for release in releases[start:start + VERSIONS_PER_PAGE]:
+        tag = str(release["tag_name"])
+        version = normalize_version(tag)
+        marker = "✅ نصب‌شده" if version == __version__ else ("⬆️" if is_newer_version(tag) else "↩️")
+        rows.append([InlineKeyboardButton(text=f"{marker} {tag}", callback_data=f"ghupd:select:{tag}")])
+    nav = []
+    if page:
+        nav.append(InlineKeyboardButton(text="◀️ قبلی", callback_data=f"ghupd:versions:{page - 1}"))
+    if start + VERSIONS_PER_PAGE < len(releases):
+        nav.append(InlineKeyboardButton(text="بعدی ▶️", callback_data=f"ghupd:versions:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text="🔄 تازه‌سازی", callback_data=f"ghupd:versions:{page}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -159,6 +191,49 @@ async def fetch_latest_release() -> dict[str, Any]:
     return data
 
 
+async def fetch_releases() -> list[dict[str, Any]]:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": f"pasarguard-tel-bot/{__version__}",
+        "X-GitHub-Api-Version": "2026-03-10",
+    }
+    releases: list[dict[str, Any]] = []
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        page = 1
+        while True:
+            async with session.get(GITHUB_RELEASES_URL, params={"per_page": 100, "page": page}) as response:
+                if response.status >= 400:
+                    raise RuntimeError(f"GitHub API error {response.status}: {(await response.text())[:300]}")
+                batch = await response.json()
+            if not isinstance(batch, list):
+                raise RuntimeError("پاسخ فهرست Releaseهای GitHub نامعتبر است.")
+            releases.extend(item for item in batch if _published_release(item))
+            if len(batch) < 100:
+                break
+            page += 1
+    releases.sort(key=lambda item: version_tuple(item["tag_name"]), reverse=True)
+    return releases
+
+
+async def fetch_published_release(tag: str) -> dict[str, Any]:
+    normalized = normalize_version(tag)
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": f"pasarguard-tel-bot/{__version__}",
+        "X-GitHub-Api-Version": "2026-03-10",
+    }
+    timeout = aiohttp.ClientTimeout(total=20)
+    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        async with session.get(f"{GITHUB_RELEASES_URL}/tags/v{normalized}") as response:
+            if response.status >= 400:
+                raise RuntimeError("Release انتخاب‌شده در GitHub منتشر نشده یا در دسترس نیست.")
+            release = await response.json()
+    if not _published_release(release) or release.get("tag_name") != f"v{normalized}":
+        raise RuntimeError("Release انتخاب‌شده معتبر یا منتشرشده نیست.")
+    return release
+
+
 async def notify_release(bot: Bot, release: dict[str, Any], *, force: bool = False) -> None:
     tag = str(release.get("tag_name") or "").strip()
     if not is_newer_version(tag):
@@ -212,9 +287,6 @@ async def announce_update_result(bot: Bot) -> None:
     target_message = int(db.get_setting("github_update_progress_message_id", 0) or 0)
     target_version = str(db.get_setting("github_update_progress_version", "") or "")
     if state == "success":
-        # Keep the update settings page in sync with the release that was
-        # actually installed, even if the periodic GitHub check has not run yet.
-        db.set_setting("github_update_latest_version", normalized_tag)
         db.set_setting("github_update_last_success_version", normalized_tag)
         text = _progress_text(normalized_tag, "success", 100)
     else:
@@ -240,11 +312,13 @@ async def announce_update_result(bot: Bot) -> None:
 
 async def trigger_update(tag: str, *, actor_id: int | None = None, automatic: bool = False) -> None:
     normalized = normalize_version(tag)
-    if not is_newer_version(normalized):
-        raise RuntimeError("این نسخه جدیدتر از نسخه نصب‌شده نیست.")
+    if normalized == __version__:
+        raise RuntimeError("این نسخه همین حالا نصب است.")
+    if automatic and not is_newer_version(normalized):
+        raise RuntimeError("آپدیت خودکار فقط نسخه جدیدتر را نصب می‌کند.")
     pending = str(db.get_setting("github_update_in_progress_version", "") or "")
-    if pending == normalized:
-        raise RuntimeError("بروزرسانی این نسخه قبلا شروع شده است.")
+    if pending:
+        raise RuntimeError(f"بروزرسانی نسخه {pending} قبلا شروع شده است.")
     db.set_setting("github_update_in_progress_version", normalized)
     db.set_setting("github_update_started_at", db.now_iso())
     db.set_setting("github_update_started_by", "auto" if automatic else int(actor_id or 0))
@@ -395,27 +469,69 @@ async def manual_check(callback: CallbackQuery):
         return
     await callback.answer("در حال بررسی…")
     try:
-        release = await fetch_latest_release()
-        tag = str(release.get("tag_name") or "")
-        normalized = normalize_version(tag)
+        releases = await fetch_releases()
+        if not releases:
+            raise RuntimeError("هیچ Release منتشرشده با شماره نسخه معتبر پیدا نشد.")
         db.set_setting("github_update_last_check_at", db.now_iso())
-        db.set_setting("github_update_latest_version", normalized)
-        if is_newer_version(normalized):
-            await callback.message.answer(
-                f"🚀 نسخه جدید موجود است.\nنسخه فعلی: <code>{html.escape(__version__)}</code>\nنسخه جدید: <code>{html.escape(normalized)}</code>",
-                reply_markup=_release_keyboard(tag, str(release.get("html_url") or "")),
-                parse_mode="HTML",
-            )
-        else:
-            await callback.message.answer(
-                f"✅ آخرین نسخه نصب است: <code>{html.escape(__version__)}</code>",
-                parse_mode="HTML",
-            )
+        db.set_setting("github_update_latest_version", normalize_version(releases[0]["tag_name"]))
+        await callback.message.answer(
+            f"📚 <b>نسخه‌های منتشرشده</b> ({len(releases)} نسخه)\nنسخه فعلی: <code>{html.escape(__version__)}</code>\n"
+            "نسخه دلخواه را انتخاب کنید. ↩️ یعنی بازگشت به نسخه قدیمی‌تر.",
+            reply_markup=_versions_keyboard(releases, 0), parse_mode="HTML",
+        )
     except Exception as exc:
         await callback.message.answer(
             f"❌ بررسی آپدیت ناموفق بود:\n<code>{html.escape(str(exc)[:1200])}</code>",
             parse_mode="HTML",
         )
+
+
+@updater_router.callback_query(F.data.startswith("ghupd:versions:"))
+async def manual_versions(callback: CallbackQuery):
+    if not is_super_admin(callback.from_user.id):
+        await deny_callback(callback)
+        return
+    try:
+        page = int(callback.data.rsplit(":", 1)[1])
+        releases = await fetch_releases()
+        if not releases or page < 0 or page * VERSIONS_PER_PAGE >= len(releases):
+            raise ValueError("صفحه یا نسخه‌ای پیدا نشد.")
+        await callback.message.edit_text(
+            f"📚 <b>نسخه‌های منتشرشده</b> ({len(releases)} نسخه)\n"
+            f"نسخه فعلی: <code>{html.escape(__version__)}</code>\nصفحه {page + 1} از {(len(releases) - 1) // VERSIONS_PER_PAGE + 1}",
+            reply_markup=_versions_keyboard(releases, page), parse_mode="HTML",
+        )
+        await callback.answer()
+    except Exception as exc:
+        await callback.answer(str(exc)[:180], show_alert=True)
+
+
+@updater_router.callback_query(F.data.startswith("ghupd:select:"))
+async def manual_select(callback: CallbackQuery):
+    if not is_super_admin(callback.from_user.id):
+        await deny_callback(callback)
+        return
+    try:
+        tag = callback.data.split(":", 2)[2]
+        normalized = normalize_version(tag)
+        release = await fetch_published_release(tag)
+        if normalized == __version__:
+            await callback.answer("این نسخه همین حالا نصب است.", show_alert=True)
+            return
+        direction = "↩️ بازگشت به نسخه قدیمی‌تر" if not is_newer_version(tag) else "⬆️ ارتقا"
+        rows = [[InlineKeyboardButton(text=f"✅ تأیید نصب {tag}", callback_data=f"ghupd:install:{tag}")]]
+        if str(release.get("html_url") or "").startswith("https://github.com/"):
+            rows.append([InlineKeyboardButton(text="📝 مشاهده Release", url=release["html_url"])])
+        rows.append([InlineKeyboardButton(text="📚 بازگشت به نسخه‌ها", callback_data="ghupd:versions:0")])
+        await callback.message.answer(
+            f"<b>{direction}</b>\nنسخه فعلی: <code>{html.escape(__version__)}</code>\n"
+            f"نسخه انتخابی: <code>{html.escape(tag)}</code>\n"
+            "قبل از تغییر کد و پایگاه داده نسخه پشتیبان گرفته می‌شود. برای اجرا تأیید کنید.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows), parse_mode="HTML",
+        )
+        await callback.answer()
+    except Exception as exc:
+        await callback.answer(str(exc)[:180], show_alert=True)
 
 
 @updater_router.callback_query(F.data.startswith("ghupd:install:"))
@@ -428,6 +544,15 @@ async def manual_install(callback: CallbackQuery):
         normalized = normalize_version(tag)
     except ValueError:
         await callback.answer("نسخه نامعتبر است.", show_alert=True)
+        return
+    try:
+        await fetch_published_release(tag)
+        if normalized == __version__:
+            raise RuntimeError("این نسخه همین حالا نصب است.")
+        if db.get_setting("github_update_in_progress_version", ""):
+            raise RuntimeError("یک بروزرسانی دیگر در حال انجام است.")
+    except Exception as exc:
+        await callback.answer(str(exc)[:180], show_alert=True)
         return
     await callback.answer("شروع شد 👌", show_alert=False)
     progress_message = await callback.message.answer(

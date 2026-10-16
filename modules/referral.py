@@ -17,11 +17,11 @@ referral_router = Router()
 REFERRAL_TEXT_DEFAULT = (
     '👥 دعوت دوستان\n\n'
     'لینک دعوت شما:\n{referral_link}\n\n'
-    'پاداش هر دعوت: {reward}\n'
-    'شرط دریافت پاداش: {condition}\n\n'
+    'درآمد از خرید موفق دوستان: {purchase_percent}%\n'
+    'درآمد از شارژ کیف پول دوستان: {wallet_percent}%\n\n'
     'کل دعوت ها: {total}\n'
-    'پاداش داده شده: {rewarded}\n'
-    'در انتظار: {pending}'
+    'دعوت‌های دارای پاداش: {rewarded}\n'
+    'درآمد کل شما: {earned}'
 )
 
 
@@ -29,27 +29,31 @@ async def send_referral_page(message: Message, bot) -> None:
     user_id = message.from_user.id if message.from_user else 0
     stats = db.referral_stats(user_id)
     me = await bot.get_me()
-    reward = db.referral_reward_amount()
-    condition = db.referral_condition()
-    condition_text = 'بعد از خرید موفق بسته' if condition == 'purchase' else 'بعد از ورود با لینک'
+    purchase_percent = db.referral_purchase_percent()
+    wallet_percent = db.referral_wallet_percent()
     link = f'https://t.me/{me.username}?start=ref_{user_id}'
     support = str(db.get_setting('support_username', '') or '')
     context = user_template_context(message.from_user, support=support)
     context.update({
         'ref_link': link,
         'referral_link': link,
-        'reward': format_toman(reward),
-        'reward_raw': int(reward or 0),
-        'condition': condition_text,
+        'reward': f'{purchase_percent:g}% خرید + {wallet_percent:g}% شارژ',
+        'reward_raw': f'{purchase_percent:g}% + {wallet_percent:g}%',
+        'condition': 'هر خرید و شارژ موفق کیف پول دوست دعوت‌شده',
+        'purchase_percent': purchase_percent,
+        'wallet_percent': wallet_percent,
         'total': int(stats.get('total') or 0),
         'rewarded': int(stats.get('rewarded') or 0),
         'pending': int(stats.get('pending') or 0),
+        'earned': format_toman(int(stats.get('total_earned') or 0)),
+        'earned_raw': int(stats.get('total_earned') or 0),
     })
     template = str(db.get_setting('referral_text', REFERRAL_TEXT_DEFAULT) or REFERRAL_TEXT_DEFAULT)
     await answer_template(message, template, context, content_key='referral_text')
 
 class ReferralAdminState(StatesGroup):
-    reward = State()
+    purchase_percent = State()
+    wallet_percent = State()
 
 
 def copy_code(value) -> str:
@@ -61,25 +65,23 @@ def format_toman(amount: int | None) -> str:
 
 
 def referral_admin_keyboard() -> InlineKeyboardMarkup:
-    condition = db.referral_condition()
     enabled = bool(db.get_setting('referral_enabled', True))
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"وضعیت دعوت: {'روشن' if enabled else 'خاموش'}", callback_data='ref_admin:toggle')],
-        [InlineKeyboardButton(text='💰 تنظیم پاداش دعوت', callback_data='ref_admin:reward')],
-        [InlineKeyboardButton(text=f"شرط پاداش: {'بعد از خرید موفق بسته' if condition == 'purchase' else 'فقط ورود با لینک'}", callback_data='ref_admin:condition')],
+        [InlineKeyboardButton(text=f"🛒 درصد خرید: {db.referral_purchase_percent():g}%", callback_data='ref_admin:purchase_percent')],
+        [InlineKeyboardButton(text=f"💳 درصد شارژ کیف پول: {db.referral_wallet_percent():g}%", callback_data='ref_admin:wallet_percent')],
         [InlineKeyboardButton(text='📊 آمار دعوت ها', callback_data='ref_admin:stats')],
     ])
 
 
 async def referral_admin_home_message(message: Message) -> None:
-    reward = db.referral_reward_amount()
-    condition = db.referral_condition()
     enabled = bool(db.get_setting('referral_enabled', True))
     await message.answer('👥 تنظیمات دعوت دوستان', reply_markup=back_keyboard())
     await message.answer(
         f"وضعیت: {'روشن' if enabled else 'خاموش'}\n"
-        f'پاداش هر دعوت: {format_toman(reward)}\n'
-        f"شرط پاداش: {'بعد از خرید موفق بسته' if condition == 'purchase' else 'صرفا ورود با لینک دعوت'}",
+        f'پاداش از هر خرید موفق: {db.referral_purchase_percent():g}%\n'
+        f'پاداش از هر شارژ کیف پول: {db.referral_wallet_percent():g}%\n'
+        'پاداش به کیف پول دعوت‌کننده واریز می‌شود.',
         reply_markup=referral_admin_keyboard(),
     )
 
@@ -107,41 +109,95 @@ async def referral_toggle(callback: CallbackQuery):
     await answer_callback(callback)
 
 
-@referral_router.callback_query(F.data == 'ref_admin:condition')
-async def referral_condition(callback: CallbackQuery):
+@referral_router.callback_query(F.data.in_({'ref_admin:purchase_percent', 'ref_admin:wallet_percent', 'ref_admin:reward'}))
+async def referral_percent_start(callback: CallbackQuery, state: FSMContext):
     if not is_admin(callback.from_user.id):
         await deny_callback(callback)
         return
-    current = db.referral_condition()
-    new = 'join' if current == 'purchase' else 'purchase'
-    db.set_setting('referral_condition', new)
-    await edit_or_answer(callback, f"شرط پاداش تغییر کرد: {'صرفا ورود با لینک' if new == 'join' else 'بعد از خرید موفق بسته'}", reply_markup=referral_admin_keyboard())
+    setting = callback.data.rsplit(':', 1)[-1]
+    if setting == 'reward':  # Old inline keyboards remain usable after upgrade.
+        setting = 'purchase_percent'
+    await state.set_state(getattr(ReferralAdminState, setting))
+    label = 'خرید موفق' if setting == 'purchase_percent' else 'شارژ کیف پول'
+    await edit_or_answer(callback, f'درصد پاداش از هر {label} را بفرستید (۰ تا ۱۰۰). برای مثال: 5 یا 2.5')
     await answer_callback(callback)
 
 
-@referral_router.callback_query(F.data == 'ref_admin:reward')
-async def referral_reward_start(callback: CallbackQuery, state: FSMContext):
-    if not is_admin(callback.from_user.id):
-        await deny_callback(callback)
-        return
-    await state.set_state(ReferralAdminState.reward)
-    await edit_or_answer(callback, 'مبلغ پاداش هر دعوت را به تومان وارد کنید. مثال: 20000')
-    await answer_callback(callback)
-
-
-@referral_router.message(ReferralAdminState.reward)
-async def referral_reward_finish(message: Message, state: FSMContext):
+@referral_router.message(ReferralAdminState.purchase_percent)
+async def referral_purchase_percent_finish(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id if message.from_user else None):
         return
-    raw = (message.text or '').replace(',', '').replace('٬', '').strip()
-    if not raw.isdigit() or int(raw) < 0:
-        await message.answer('لطفا عدد معتبر وارد کنید.')
+    value = _parse_referral_percent(message.text)
+    if value is None:
+        await message.answer('درصد معتبر بین ۰ تا ۱۰۰ وارد کنید. مثال: 5 یا 2.5')
         return
-    db.set_setting('referral_reward_toman', int(raw))
-    db.set_setting('referral_reward_amount', int(raw))
+    db.set_setting('referral_purchase_percent', value)
     await state.clear()
-    await message.answer(f'پاداش دعوت ثبت شد: {format_toman(int(raw))}', reply_markup=back_keyboard())
+    await message.answer(f'درصد پاداش خرید ثبت شد: {value:g}%', reply_markup=back_keyboard())
     await referral_admin_home_message(message)
+
+
+@referral_router.message(ReferralAdminState.wallet_percent)
+async def referral_wallet_percent_finish(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id if message.from_user else None):
+        return
+    value = _parse_referral_percent(message.text)
+    if value is None:
+        await message.answer('درصد معتبر بین ۰ تا ۱۰۰ وارد کنید. مثال: 5 یا 2.5')
+        return
+    db.set_setting('referral_wallet_percent', value)
+    await state.clear()
+    await message.answer(f'درصد پاداش شارژ کیف پول ثبت شد: {value:g}%', reply_markup=back_keyboard())
+    await referral_admin_home_message(message)
+
+
+def _parse_referral_percent(raw: str | None) -> float | None:
+    try:
+        value = float(str(raw or '').replace(',', '.').replace('٬', '').strip())
+    except (TypeError, ValueError):
+        return None
+    return value if 0 <= value <= 100 else None
+
+
+@referral_router.callback_query(F.data == 'ref_admin:condition')
+async def referral_legacy_condition(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await deny_callback(callback)
+        return
+    await callback.answer('تنظیم ثابت قبلی حذف شده؛ درصد خرید و شارژ را از منوی دعوت تعیین کنید.', show_alert=True)
+
+
+async def notify_pending_referral_commissions(bot, limit: int = 20) -> int:
+    """Deliver durable commission notifications; wallet credit is already committed."""
+    delivered = 0
+    for commission in db.pending_referral_commissions(limit):
+        event_type = str(commission.get('event_type') or '')
+        if event_type == 'wallet_charge':
+            source_label = 'شارژ کیف پول دوست دعوت‌شده'
+        elif event_type == 'purchase':
+            source_label = 'خرید موفق دوست دعوت‌شده'
+        else:
+            source_label = 'تراکنش دوست دعوت‌شده'
+        reward = int(commission.get('reward_amount') or 0)
+        text = (
+            '🎉 پاداش دعوت به کیف پول شما واریز شد.\n\n'
+            f'{source_label}: {format_toman(int(commission.get("base_amount") or 0))}\n'
+            f'درصد پاداش: {float(commission.get("percent") or 0):g}%\n'
+            f'مبلغ واریزی به کیف پول شما: +{format_toman(reward)}'
+        )
+        try:
+            await bot.send_message(int(commission['inviter_id']), text)
+        except Exception as exc:
+            db.mark_referral_commission_notification_failed(int(commission['id']), type(exc).__name__)
+            db.record_system_error(
+                'referral.notify_commission', str(exc), user_id=int(commission['inviter_id']),
+                entity_type='referral_commission', entity_id=str(commission['id']),
+                error_type=type(exc).__name__,
+            )
+            continue
+        db.mark_referral_commission_notified(int(commission['id']))
+        delivered += 1
+    return delivered
 
 
 @referral_router.callback_query(F.data == 'ref_admin:stats')

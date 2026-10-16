@@ -77,9 +77,7 @@ async def start_handler(message: Message, bot: Bot):
         if len(parts) > 1 and parts[1].startswith('ref_'):
             ref_id = parts[1].replace('ref_', '', 1).strip()
             if ref_id.isdigit():
-                created = db.create_referral(int(ref_id), user.id)
-                if created and db.referral_condition() == 'join':
-                    db.process_referral_reward(user.id, reason='join')
+                db.create_referral(int(ref_id), user.id)
         if len(parts) > 1 and parts[1].lower().startswith('ad_'):
             # Case-insensitive ad attribution; keep original suffix case then normalize in db
             payload = parts[1].strip()

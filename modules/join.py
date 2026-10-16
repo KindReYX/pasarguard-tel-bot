@@ -195,6 +195,11 @@ class RequiredJoinMiddleware(BaseMiddleware):
             return await handler(event, data)
         if isinstance(event, CallbackQuery) and event.data == 'join:check':
             return await handler(event, data)
+        command = (event.text or '').split(maxsplit=1) if isinstance(event, Message) else []
+        if command and command[0].split('@', 1)[0] == '/start':
+            # The start handler records referral/ad deep-link payloads before
+            # running ensure_force_join. Blocking it here loses attribution.
+            return await handler(event, data)
         bot = data.get('bot')
         if not bot:
             return await handler(event, data)

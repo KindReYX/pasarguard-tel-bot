@@ -185,7 +185,7 @@ def build_admin_service_detail_text(service: dict, user_data: dict | None = None
     data_limit = int(user_data.get('data_limit') or service.get('data_limit') or 0)
     used = int(user_data.get('used_traffic') or service.get('used_traffic') or 0)
     remaining = max(0, data_limit - used) if data_limit > 0 else 0
-    sub_url = service.get('subscription_url') or api_client.extract_subscription_url(user_data) or '-'
+    sub_url = api_client.normalize_subscription_url(service.get('subscription_url')) or api_client.extract_subscription_url(user_data) or '-'
     return (
         f'📦 جزئیات سرویس\n\n'
         f'🆔 آی‌دی سرویس: {code(service.get("id"))}\n'

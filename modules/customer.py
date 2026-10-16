@@ -149,12 +149,12 @@ async def send_subscription_delivery(message: Message, service: dict, sub_url: s
     revoke. The mandatory copyable subscription URL remains the first caption line.
     """
     username = service.get('service_username') or service.get('panel_username') or '-'
-    sub = sub_url or service.get('subscription_url')
+    sub = api_client.normalize_subscription_url(sub_url or service.get('subscription_url'))
     if not sub:
         try:
             refreshed, user_data = await refresh_service_from_panel(service)
             service = refreshed
-            sub = service.get('subscription_url') or api_client.extract_subscription_url(user_data)
+            sub = api_client.normalize_subscription_url(service.get('subscription_url')) or api_client.extract_subscription_url(user_data)
         except Exception:
             sub = None
     if not sub:
@@ -305,7 +305,7 @@ async def send_config_delivery(message: Message, service: dict, config_link: str
         return
     if is_wireguard_link(config_link):
         try:
-            subscription_url = service.get('subscription_url')
+            subscription_url = api_client.normalize_subscription_url(service.get('subscription_url'))
             content = await get_wireguard_config(config_link, subscription_url)
             if content:
                 filename = f"wireguard_{int(service.get('id') or 0)}_{index + 1}.conf"
@@ -962,7 +962,7 @@ def _service_detail_context(service: dict, user_data: dict | None = None, sub_ur
     client = user_data.get('client_type') or user_data.get('last_client') or user_data.get('user_agent') or service.get('client_type') or 'نامشخص'
     context = db.product_context_for_template(service.get('package_id'))
     context.update({
-        'sub_link': str(sub_url or service.get('subscription_url') or api_client.extract_subscription_url(user_data) or '-'),
+        'sub_link': str(api_client.normalize_subscription_url(sub_url or service.get('subscription_url')) or api_client.extract_subscription_url(user_data) or '-'),
         'status': service_status_label(user_data.get('status') or service.get('status')),
         'service_name': str(service.get('service_username') or '-'),
         'package_name': package_display_name_for_template(service.get('package_id'), service.get('package_name') or 'نامشخص'),
@@ -1017,7 +1017,7 @@ def build_service_detail_caption(service: dict, user_data: dict | None = None, s
 async def show_service_detail_photo(callback: CallbackQuery, service: dict, user_data: dict | None = None) -> bool:
     """Replace the current customer screen with QR photo + full service caption."""
     user_data = user_data or {}
-    sub = service.get('subscription_url') or api_client.extract_subscription_url(user_data)
+    sub = api_client.normalize_subscription_url(service.get('subscription_url')) or api_client.extract_subscription_url(user_data)
     if not sub:
         return False
     detail_context = _service_detail_context(service, user_data, sub_url=sub)
@@ -1066,11 +1066,11 @@ async def get_service_config_links(service: dict) -> list[str]:
     username = service.get('panel_username') or service.get('service_username')
     links: list[str] = []
     user_data: dict = {}
-    sub_url = service.get('subscription_url')
+    sub_url = api_client.normalize_subscription_url(service.get('subscription_url'))
 
     if username:
         try:
-            links, user_data, server_sub_url = await api_client.get_user_config_links(str(username))
+            links, user_data, server_sub_url = await api_client.get_user_config_links(str(username), fallback_subscription_url=sub_url)
             sub_url = server_sub_url or sub_url
         except Exception:
             links = []
@@ -1118,7 +1118,7 @@ async def show_preinvoice(callback_or_message, state: FSMContext) -> None:
 async def refresh_service_from_panel(service: dict) -> tuple[dict, dict]:
     username = service.get('panel_username') or service.get('service_username')
     user_data = await api_client.get_user(username)
-    sub_url = api_client.extract_subscription_url(user_data) or service.get('subscription_url')
+    sub_url = api_client.extract_subscription_url(user_data, fallback_to_username=False) or api_client.normalize_subscription_url(service.get('subscription_url')) or api_client.subscription_url_for_username(str(username))
     links = api_client.extract_config_links(user_data)
     db.update_user_service_snapshot(int(service['id']), user_data, sub_url, links)
     updated = db.get_user_service(int(service['id']), int(service['telegram_id'])) or service
@@ -1905,11 +1905,11 @@ async def service_subscription(callback: CallbackQuery):
     if not service:
         await callback.answer('سرویس پیدا نشد.', show_alert=True)
         return
-    sub = service.get('subscription_url')
+    sub = api_client.normalize_subscription_url(service.get('subscription_url'))
     if not sub:
         try:
             service, user_data = await refresh_service_from_panel(service)
-            sub = service.get('subscription_url') or api_client.extract_subscription_url(user_data)
+            sub = api_client.normalize_subscription_url(service.get('subscription_url')) or api_client.extract_subscription_url(user_data)
         except Exception:
             pass
     if not sub:
@@ -1964,7 +1964,9 @@ async def service_revoke(callback: CallbackQuery):
         username = service.get('panel_username') or service.get('service_username')
         result = await api_client.revoke_user_subscription(username)
         user_data = await api_client.get_user(username)
-        sub_url = api_client.extract_subscription_url(user_data) or api_client.extract_subscription_url(result) or service.get('subscription_url')
+        sub_url = (api_client.extract_subscription_url(user_data, fallback_to_username=False)
+                   or api_client.extract_subscription_url(result, fallback_to_username=False)
+                   or api_client.normalize_subscription_url(service.get('subscription_url')))
         links = api_client.extract_config_links(user_data) or api_client.extract_config_links(result)
         db.update_user_service_snapshot(service_id, user_data, sub_url, links)
         updated_service = db.get_user_service(service_id, callback.from_user.id) or service

@@ -14,6 +14,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from aiogram.exceptions import TelegramRetryAfter
 
 import db
+import api_client
 import modules.payment_engine as payment_engine
 from modules import edit_runtime
 from keyboards import EditableButtonFilter
@@ -673,7 +674,7 @@ async def _send_order_success_to_customer(bot: Bot, order: dict, service_message
     if not service:
         raise RuntimeError('سرویس ساخته شده در دیتابیس پیدا نشد؛ امکان تحویل به کاربر وجود ندارد.')
 
-    sub = service.get('subscription_url')
+    sub = api_client.normalize_subscription_url(service.get('subscription_url'))
     sub_url = str(sub).strip() if sub else None
     receipt_text = payment_engine.build_receipt(order, '\n' + service_message)
 
@@ -736,7 +737,7 @@ async def _complete_order(bot: Bot, receipt: dict) -> tuple[bool, str, str | Non
             'SELECT subscription_url FROM user_services WHERE order_id=? AND telegram_id=? AND is_active=1 ORDER BY id DESC LIMIT 1',
             (order_id, int(order['user_id'] if order.get('user_id') else receipt['user_id'])),
         )
-        existing_sub = (existing_service or {}).get('subscription_url') if existing_service else None
+        existing_sub = api_client.normalize_subscription_url((existing_service or {}).get('subscription_url'))
         return True, 'سفارش قبلا با موفقیت تحویل شده است.', existing_sub
 
     payable = int(order.get('payable_toman') or receipt['amount_toman'] or 0)
@@ -801,7 +802,7 @@ async def _retry_order_delivery(bot: Bot, receipt: dict) -> tuple[bool, str, str
         (order_id, int(order['user_id'])),
     )
     if str(order.get('status') or '') == 'service_ready' and existing_service:
-        sub = existing_service.get('subscription_url')
+        sub = api_client.normalize_subscription_url(existing_service.get('subscription_url'))
         return True, 'این سفارش قبلا با موفقیت تحویل شده است.', (str(sub).strip() if sub else None), True
 
     # If a previous attempt actually saved the service but failed afterwards,
@@ -876,7 +877,7 @@ async def approve_receipt(callback: CallbackQuery, state: FSMContext):
             if not sub_url:
                 svc = db.fetchone('SELECT subscription_url FROM user_services WHERE order_id=? AND telegram_id=? AND is_active=1 ORDER BY id DESC LIMIT 1', (int(receipt['entity_id']), int(receipt['user_id'])))
                 if svc and svc.get('subscription_url'):
-                    sub_url = str(svc.get('subscription_url')).strip()
+                    sub_url = api_client.normalize_subscription_url(svc.get('subscription_url'))
         db.add_log(callback.from_user.id, 'card_receipt_approved', 'card_receipt', str(receipt_id))
         if receipt['kind'] == 'order' and not delivery_ok:
             await callback.answer('پرداخت تایید شد، اما تحویل سرویس کامل نشد. دکمه تلاش مجدد اضافه شد.', show_alert=True)
@@ -967,7 +968,7 @@ async def retry_receipt_delivery(callback: CallbackQuery):
         (order_id, int(order['user_id'])),
     )
     if str(order.get('status') or '') == 'service_ready' and existing:
-        sub = existing.get('subscription_url')
+        sub = api_client.normalize_subscription_url(existing.get('subscription_url'))
         sub_url = str(sub).strip() if sub else None
         updated = db.fetchone('SELECT * FROM card_receipts WHERE id=?', (receipt_id,)) or receipt
         updated['status'] = 'approved'

@@ -1265,7 +1265,9 @@ def mark_wallet_charge_paid_provider(request_id: int, method: str, provider_paym
             conn.execute('INSERT INTO wallet_transactions (user_id, admin_id, amount, reason, created_at) VALUES (?, NULL, ?, ?, ?)',
                          (int(req['user_id']), bonus, f'بونوس کمپین شارژ #{int(req.get("campaign_id") or 0)} برای درخواست #{request_id}', now_iso()))
         conn.execute('UPDATE wallet_charge_requests SET campaign_bonus_applied=1, campaign_bonus_amount=? WHERE id=?', (bonus, int(request_id)))
-        if referral_percent > 0 and referral_enabled:
+        if (referral_percent > 0 and referral_enabled
+                and (referral_reward_scope('wallet_charge') == 'all'
+                     or _is_first_referral_event(conn, int(req['user_id']), 'wallet_charge', request_id))):
             _award_referral_commission(
                 conn, invited_id=int(req['user_id']), event_type='wallet_charge',
                 event_id=str(request_id), base_amount=int(req['amount_toman'] or 0),
@@ -1597,6 +1599,27 @@ def referral_wallet_percent() -> float:
     return _referral_percent_setting('referral_wallet_percent')
 
 
+def referral_reward_scope(event_type: str) -> str:
+    """Choose first successful event or every event for each commission type."""
+    key = 'referral_purchase_scope' if event_type == 'purchase' else 'referral_wallet_scope'
+    return 'first' if str(get_setting(key, 'all') or '').strip().lower() == 'first' else 'all'
+
+
+def _is_first_referral_event(conn: sqlite3.Connection, invited_id: int, event_type: str, event_id: int) -> bool:
+    if event_type == 'purchase':
+        row = conn.execute(
+            """SELECT id FROM orders WHERE user_id=? AND status='service_ready'
+               AND COALESCE(order_type,'new') IN ('new','renew') ORDER BY id LIMIT 1""",
+            (int(invited_id),),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT id FROM wallet_charge_requests WHERE user_id=? AND status='paid' ORDER BY id LIMIT 1",
+            (int(invited_id),),
+        ).fetchone()
+    return bool(row and int(row['id']) == int(event_id))
+
+
 def _award_referral_commission(
     conn: sqlite3.Connection, *, invited_id: int, event_type: str,
     event_id: str, base_amount: int, percent: float,
@@ -1638,13 +1661,58 @@ def _award_referral_commission(
 def create_referral(inviter_id: int, invited_id: int) -> bool:
     if int(inviter_id) == int(invited_id):
         return False
-    if fetchone('SELECT id FROM referrals WHERE invited_id=?', (int(invited_id),)):
-        return False
-    execute(
-        'INSERT INTO referrals (inviter_id, invited_id, status, reward_amount, reward_paid, created_at) VALUES (?, ?, ?, ?, 0, ?)',
-        (int(inviter_id), int(invited_id), 'pending', 0, now_iso()),
-    )
-    return True
+    with connect() as conn:
+        cur = conn.execute(
+            '''INSERT OR IGNORE INTO referrals
+               (inviter_id, invited_id, status, reward_amount, reward_paid, created_at)
+               VALUES (?, ?, 'pending', 0, 0, ?)''',
+            (int(inviter_id), int(invited_id), now_iso()),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def referral_test_reset_preview() -> dict[str, int]:
+    return {
+        'referrals': int(fetchone('SELECT COUNT(*) AS c FROM referrals')['c']),
+        'pending_messages': int(fetchone('''SELECT COUNT(*) AS c FROM referral_commissions
+            WHERE reward_amount>0 AND notified_at IS NULL AND notification_attempts<5''')['c']),
+    }
+
+
+def reset_referrals_for_testing(admin_id: int, confirmation_token: str) -> dict[str, int]:
+    """Clear referral attribution, preserving payouts and all financial history."""
+    if not confirmation_token or len(confirmation_token) < 16:
+        raise ValueError('Missing confirmation token')
+    with connect() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        used = conn.execute("SELECT value FROM settings WHERE key='referral_reset_used_nonce'").fetchone()
+        if used and used['value'] == json.dumps(confirmation_token):
+            conn.rollback()
+            raise ValueError('Confirmation token already used')
+        referrals = int(conn.execute('SELECT COUNT(*) AS c FROM referrals').fetchone()['c'])
+        pending = int(conn.execute('''SELECT COUNT(*) AS c FROM referral_commissions
+            WHERE reward_amount>0 AND notified_at IS NULL AND notification_attempts<5''').fetchone()['c'])
+        last_commission = int(conn.execute('SELECT COALESCE(MAX(id),0) AS id FROM referral_commissions').fetchone()['id'])
+        # Keep the ledger and credited wallets intact. Stop unsent notifications
+        # from the previous test cycle without claiming they were delivered.
+        conn.execute('''UPDATE referral_commissions SET notification_attempts=5,
+            last_error='suppressed by referral test reset'
+            WHERE reward_amount>0 AND notified_at IS NULL AND notification_attempts<5''')
+        conn.execute('DELETE FROM referrals')
+        conn.execute('''INSERT INTO settings(key,value,updated_at) VALUES('referral_reset_commission_id',?,?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at''',
+            (json.dumps(last_commission), now_iso()))
+        conn.execute('''INSERT INTO settings(key,value,updated_at) VALUES('referral_reset_used_nonce',?,?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at''',
+            (json.dumps(confirmation_token), now_iso()))
+        conn.execute('''INSERT INTO admin_logs(admin_id,action,entity_type,entity_id,details,created_at)
+            VALUES (?,?,?,?,?,?)''',
+            (int(admin_id), 'referral_test_reset', 'referrals', '-',
+             json.dumps({'referrals': referrals, 'suppressed_notifications': pending}), now_iso()))
+        conn.commit()
+    _SETTINGS_CACHE.pop('referral_reset_commission_id', None)
+    return {'referrals': referrals, 'pending_messages': pending}
 
 
 def referral_condition() -> str:
@@ -1679,6 +1747,10 @@ def process_referral_purchase_reward(order_id: int) -> bool:
                 or str(order.get('order_type') or 'new') not in {'new', 'renew'}):
             conn.rollback()
             return False
+        if (referral_reward_scope('purchase') == 'first'
+                and not _is_first_referral_event(conn, int(order.get('user_id') or 0), 'purchase', order_id)):
+            conn.rollback()
+            return False
         commission = _award_referral_commission(
             conn, invited_id=int(order.get('user_id') or 0), event_type='purchase',
             event_id=str(int(order_id)), base_amount=int(order.get('amount_toman') or 0),
@@ -1707,11 +1779,15 @@ def mark_referral_commission_notification_failed(commission_id: int, error: str)
 
 
 def referral_stats(user_id: int) -> dict[str, int]:
+    reset_id = max(0, int(get_setting('referral_reset_commission_id', 0) or 0))
     total = fetchone('SELECT COUNT(*) AS c FROM referrals WHERE inviter_id=?', (int(user_id),))
-    rewarded = fetchone('SELECT COUNT(DISTINCT invited_id) AS c FROM referral_commissions WHERE inviter_id=? AND reward_amount>0', (int(user_id),))
+    rewarded = fetchone('''SELECT COUNT(DISTINCT c.invited_id) AS c FROM referral_commissions c
+        JOIN referrals r ON r.invited_id=c.invited_id AND r.inviter_id=c.inviter_id
+        WHERE c.inviter_id=? AND c.id>? AND c.reward_amount>0''', (int(user_id), reset_id))
     pending = fetchone('''SELECT COUNT(*) AS c FROM referrals r WHERE r.inviter_id=?
-                          AND NOT EXISTS (SELECT 1 FROM referral_commissions c WHERE c.invited_id=r.invited_id AND c.reward_amount>0)''', (int(user_id),))
-    earned = fetchone('SELECT COALESCE(SUM(reward_amount),0) AS s FROM referral_commissions WHERE inviter_id=?', (int(user_id),))
+                          AND NOT EXISTS (SELECT 1 FROM referral_commissions c WHERE c.invited_id=r.invited_id
+                          AND c.inviter_id=r.inviter_id AND c.id>? AND c.reward_amount>0)''', (int(user_id), reset_id))
+    earned = fetchone('SELECT COALESCE(SUM(reward_amount),0) AS s FROM referral_commissions WHERE inviter_id=? AND id>?', (int(user_id), reset_id))
     return {
         'total': int(total['c'] if total else 0),
         'rewarded': int(rewarded['c'] if rewarded else 0),
@@ -2320,7 +2396,10 @@ def create_invoice_text(order: dict[str, Any], service_message: str = '') -> str
         )
     except Exception:
         service = None
-    sub_link = (service or {}).get('subscription_url') or '-'
+    # Resolve at render time so invoices for older services use the current
+    # subscription base while keeping the stored service token unchanged.
+    from api_client import normalize_subscription_url
+    sub_link = normalize_subscription_url((service or {}).get('subscription_url')) or '-'
     template = str(get_setting('invoice_text', INVOICE_TEXT_DEFAULT) or INVOICE_TEXT_DEFAULT)
     product_ctx = product_context_for_template(order.get('package_id'))
     values = {

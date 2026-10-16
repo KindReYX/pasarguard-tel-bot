@@ -8,7 +8,7 @@ import re
 import time
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse, urlsplit, urlunsplit
 
 import aiohttp
 
@@ -782,11 +782,24 @@ def normalize_subscription_url(value: str | None, user_data: dict | None = None)
     raw = str(value).strip()
     if not raw:
         return None
-    if raw.startswith('http://') or raw.startswith('https://'):
-        return raw
-    base = str(db.get_setting('subscription_base_url', settings.subscription_base_url) or '').rstrip('/')
+    base = str(db.get_setting('subscription_base_url', settings.subscription_base_url) or settings.subscription_base_url or '').strip().rstrip('/')
     if not base:
         return raw
+    old = urlsplit(raw)
+    configured = urlsplit(base)
+    if old.scheme in ('http', 'https') and configured.scheme in ('http', 'https'):
+        # Keep the service's original subscription token, even when it differs
+        # from the panel username. A host-only base retains the old URL path;
+        # a base with a path/template defines the new path.
+        token = old.path.rstrip('/').split('/')[-1]
+        if '{username}' in base or '{token}' in base:
+            target = base.format(username=token, token=token)
+        elif configured.path.rstrip('/'):
+            target = base + ('/' + token if token else '')
+        else:
+            target = urlunsplit((configured.scheme, configured.netloc, old.path, '', ''))
+        updated = urlsplit(target)
+        return urlunsplit((updated.scheme, updated.netloc, updated.path, updated.query or old.query, updated.fragment or old.fragment))
     username = None
     token = raw.strip('/').split('/')[-1] if raw.strip('/') else raw
     if user_data:
@@ -802,15 +815,17 @@ def normalize_subscription_url(value: str | None, user_data: dict | None = None)
 
 def subscription_url_for_username(username: str) -> str | None:
     username = str(username or '').strip()
-    if not username or not settings.subscription_base_url:
+    if not username:
         return None
-    base = str(db.get_setting('subscription_base_url', settings.subscription_base_url) or '').rstrip('/')
+    base = str(db.get_setting('subscription_base_url', settings.subscription_base_url) or settings.subscription_base_url or '').strip().rstrip('/')
+    if not base:
+        return None
     if '{username}' in base or '{token}' in base:
         return base.format(username=username, token=username)
     return base.rstrip('/') + '/' + username.lstrip('/')
 
 
-def extract_subscription_url(user_data: dict) -> str | None:
+def extract_subscription_url(user_data: dict, *, fallback_to_username: bool = True) -> str | None:
     for key in (
         'subscription_url', 'subscription', 'sub_url', 'sub_link', 'subscription_link',
         'subscription_path', 'sub_path', 'subscription_token', 'sub_token', 'token',
@@ -830,7 +845,7 @@ def extract_subscription_url(user_data: dict) -> str | None:
                     if normalized:
                         return normalized
     username = user_data.get('username') or user_data.get('name') or user_data.get('panel_username')
-    if username:
+    if username and fallback_to_username:
         return subscription_url_for_username(str(username))
     return None
 
@@ -1042,7 +1057,7 @@ async def _try_user_config_endpoint(username: str, path: str) -> Any | None:
             return None
 
 
-async def get_user_config_links(username: str) -> tuple[list[str], dict, str | None]:
+async def get_user_config_links(username: str, fallback_subscription_url: str | None = None) -> tuple[list[str], dict, str | None]:
     """Fetch current config links directly from the panel API for one user.
 
     The first and most important source is GET /api/user/{username}, because the
@@ -1060,14 +1075,14 @@ async def get_user_config_links(username: str) -> tuple[list[str], dict, str | N
 
     try:
         user_data = await get_user(username)
-        subscription_url = extract_subscription_url(user_data)
+        subscription_url = extract_subscription_url(user_data, fallback_to_username=False)
         links.extend(extract_config_links(user_data))
     except Exception:
         user_data = {}
 
-    # Prefer subscription from user object/.env when the direct object did not include configs.
+    # A saved token takes precedence over guessing from the panel username.
     if not subscription_url:
-        subscription_url = subscription_url_for_username(username)
+        subscription_url = normalize_subscription_url(fallback_subscription_url) or subscription_url_for_username(username)
     if not links and subscription_url:
         try:
             links.extend(await fetch_subscription_configs(subscription_url))
@@ -1090,7 +1105,7 @@ async def get_user_config_links(username: str) -> tuple[list[str], dict, str | N
             if isinstance(data, dict) and not user_data:
                 user_data = data
             if isinstance(data, dict):
-                subscription_url = extract_subscription_url(data) or subscription_url
+                subscription_url = extract_subscription_url(data, fallback_to_username=False) or subscription_url
             links.extend(_extract_links_from_any_response(data))
             if links:
                 break

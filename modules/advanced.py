@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import html
+import secrets
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -190,7 +192,9 @@ SETTINGS: list[SettingItem] = [
     # Wallet/referral/test
     SettingItem('wallet_min_charge_toman', 'حداقل شارژ کیف پول به تومان', 'wallet', 'int', 10000),
     SettingItem('referral_purchase_percent', 'درصد پاداش دعوت از هر خرید موفق', 'referral', 'float', 0, '۰ تا ۱۰۰؛ درصد از مبلغ نهایی سفارش، پس از آماده‌شدن سرویس.'),
+    SettingItem('referral_purchase_scope', 'محدوده پاداش خرید دعوت‌شده', 'referral', 'text', 'all', 'all = همه خریدهای موفق | first = فقط اولین خرید موفق'),
     SettingItem('referral_wallet_percent', 'درصد پاداش دعوت از هر شارژ کیف پول', 'referral', 'float', 0, '۰ تا ۱۰۰؛ درصد از مبلغ شارژ پرداخت‌شده.'),
+    SettingItem('referral_wallet_scope', 'محدوده پاداش شارژ دعوت‌شده', 'referral', 'text', 'all', 'all = همه شارژهای موفق | first = فقط اولین شارژ موفق'),
     SettingItem('renewal_mode', 'نحوه اعمال تمدید', 'renewal', 'text', 'add', 'add = افزودن زمان/حجم باقی‌مانده | replace = جایگزینی و سوزاندن باقی‌مانده'),
     SettingItem('github_auto_check_enabled', 'چک خودکار آپدیت هر 24 ساعت', 'updates', 'bool', True, 'اگر خاموش باشد، فقط با دکمه «بررسی آپدیت همین الان» GitHub بررسی می‌شود.'),
     SettingItem('github_auto_update_enabled', 'نصب خودکار آپدیت', 'updates', 'bool', False, 'اگر روشن باشد و چک خودکار هم روشن باشد، Release جدید بعد از شناسایی به صورت خودکار نصب می‌شود.'),
@@ -244,6 +248,10 @@ def _value_text(item: SettingItem, *, full: bool = False) -> str:
 
 def _parse_value(item: SettingItem, raw: str) -> Any:
     raw = (raw or '').strip()
+    if item.key in {'referral_purchase_scope', 'referral_wallet_scope'}:
+        if raw.lower() not in {'all', 'first'}:
+            raise ValueError('محدوده پاداش باید all یا first باشد.')
+        return raw.lower()
     if raw == '-' and item.value_type in {'text', 'secret'}:
         return ''
     if item.value_type == 'int':
@@ -310,6 +318,8 @@ def category_keyboard(group: str) -> InlineKeyboardMarkup:
     if group == 'card':
         rows.append([InlineKeyboardButton(text='👥 انتخاب ادمین های بررسی فیش', callback_data='cardadmin:approvers')])
         rows.append([InlineKeyboardButton(text='🧾 فیش های در انتظار', callback_data='cardadmin:pending')])
+    if group == 'referral':
+        rows.append([InlineKeyboardButton(text='🧪 حذف تمام دوستان و ریست دعوت‌ها', callback_data='adv:refreset:start', style='danger')])
     rows.append([InlineKeyboardButton(text='🔙 برگشت به گروه ها', callback_data='adv:home')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -377,6 +387,67 @@ async def advanced_category(callback: CallbackQuery):
         if item.group == group:
             lines.append(f'{item.label}: {_value_text(item)}')
     await edit_or_answer(callback, '\n'.join(lines), reply_markup=category_keyboard(group))
+    await answer_callback(callback)
+
+
+@advanced_router.callback_query(F.data == 'adv:refreset:start')
+async def referral_test_reset_start(callback: CallbackQuery, state: FSMContext):
+    if not is_super_admin(callback.from_user.id):
+        await deny_callback(callback)
+        return
+    preview = db.referral_test_reset_preview()
+    nonce = secrets.token_hex(12)
+    await state.update_data(referral_test_reset={'nonce': nonce, 'admin_id': callback.from_user.id, 'expires': time.time() + 120})
+    text = (
+        '⚠️ تأیید ریست آزمایشی دعوت دوستان\n\n'
+        f'تعداد انتساب‌های دعوت که حذف می‌شود: {preview["referrals"]}\n'
+        f'اعلان‌های پاداشِ ارسال‌نشده که متوقف می‌شود: {preview["pending_messages"]}\n\n'
+        'پس از تأیید، افراد می‌توانند دوباره از لینک دعوت وارد شوند و شمارش دعوت از صفر شروع می‌شود. '
+        'حساب کاربران، سفارش‌ها، سرویس‌ها، موجودی کیف پول و سوابق پاداش پرداخت‌شده حفظ می‌شوند. '
+        'ورودهای تبلیغاتی و تنظیمات دیگر نیز دست‌نخورده می‌مانند. '
+        'این عملیات برای بازگرداندن انتساب‌های قبلی به نسخه پشتیبان نیاز دارد.\n\n'
+        'این تأیید فقط دو دقیقه اعتبار دارد.'
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='✅ تأیید حذف انتساب‌های دعوت', callback_data=f'adv:refreset:confirm:{nonce}', style='danger')],
+        [InlineKeyboardButton(text='❌ انصراف', callback_data='adv:refreset:cancel')],
+    ])
+    await edit_or_answer(callback, text, reply_markup=keyboard)
+    await answer_callback(callback)
+
+
+@advanced_router.callback_query(F.data == 'adv:refreset:cancel')
+async def referral_test_reset_cancel(callback: CallbackQuery, state: FSMContext):
+    if not is_super_admin(callback.from_user.id):
+        await deny_callback(callback)
+        return
+    await state.update_data(referral_test_reset=None)
+    await edit_or_answer(callback, 'ریست دعوت‌ها لغو شد. هیچ داده‌ای حذف نشد.', reply_markup=category_keyboard('referral'))
+    await answer_callback(callback)
+
+
+@advanced_router.callback_query(F.data.startswith('adv:refreset:confirm:'))
+async def referral_test_reset_confirm(callback: CallbackQuery, state: FSMContext):
+    if not is_super_admin(callback.from_user.id):
+        await deny_callback(callback)
+        return
+    nonce = callback.data.rsplit(':', 1)[-1]
+    saved = (await state.get_data()).get('referral_test_reset') or {}
+    if (saved.get('nonce') != nonce or saved.get('admin_id') != callback.from_user.id
+            or time.time() > float(saved.get('expires') or 0)):
+        await callback.answer('تأیید نامعتبر یا منقضی شده است؛ دوباره از منو شروع کنید.', show_alert=True)
+        return
+    await state.update_data(referral_test_reset=None)
+    try:
+        result = db.reset_referrals_for_testing(callback.from_user.id, nonce)
+    except Exception as exc:
+        db.record_system_error('advanced.referral_test_reset', str(exc), user_id=callback.from_user.id, error_type=type(exc).__name__)
+        await callback.answer('ریست انجام نشد؛ جزئیات خطا ثبت شد.', show_alert=True)
+        return
+    await edit_or_answer(callback,
+                         f'✅ ریست آزمایشی انجام شد. {result["referrals"]} انتساب دعوت حذف شد. '
+                         'هیچ پیامی برای کاربران ارسال نشد.',
+                         reply_markup=category_keyboard('referral'))
     await answer_callback(callback)
 
 

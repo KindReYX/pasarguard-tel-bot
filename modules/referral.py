@@ -18,11 +18,17 @@ REFERRAL_TEXT_DEFAULT = (
     '👥 دعوت دوستان\n\n'
     'لینک دعوت شما:\n{referral_link}\n\n'
     'درآمد از خرید موفق دوستان: {purchase_percent}%\n'
-    'درآمد از شارژ کیف پول دوستان: {wallet_percent}%\n\n'
+    'محدوده پاداش خرید: {purchase_scope}\n'
+    'درآمد از شارژ کیف پول دوستان: {wallet_percent}%\n'
+    'محدوده پاداش شارژ: {wallet_scope}\n\n'
     'کل دعوت ها: {total}\n'
     'دعوت‌های دارای پاداش: {rewarded}\n'
     'درآمد کل شما: {earned}'
 )
+
+
+def _scope_label(event_type: str) -> str:
+    return 'فقط اولین بار' if db.referral_reward_scope(event_type) == 'first' else 'همه دفعات'
 
 
 async def send_referral_page(message: Message, bot) -> None:
@@ -39,9 +45,11 @@ async def send_referral_page(message: Message, bot) -> None:
         'referral_link': link,
         'reward': f'{purchase_percent:g}% خرید + {wallet_percent:g}% شارژ',
         'reward_raw': f'{purchase_percent:g}% + {wallet_percent:g}%',
-        'condition': 'هر خرید و شارژ موفق کیف پول دوست دعوت‌شده',
+        'condition': f'خرید: {_scope_label("purchase")}؛ شارژ کیف پول: {_scope_label("wallet_charge")}',
         'purchase_percent': purchase_percent,
         'wallet_percent': wallet_percent,
+        'purchase_scope': _scope_label('purchase'),
+        'wallet_scope': _scope_label('wallet_charge'),
         'total': int(stats.get('total') or 0),
         'rewarded': int(stats.get('rewarded') or 0),
         'pending': int(stats.get('pending') or 0),
@@ -69,7 +77,9 @@ def referral_admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"وضعیت دعوت: {'روشن' if enabled else 'خاموش'}", callback_data='ref_admin:toggle')],
         [InlineKeyboardButton(text=f"🛒 درصد خرید: {db.referral_purchase_percent():g}%", callback_data='ref_admin:purchase_percent')],
+        [InlineKeyboardButton(text=f"🔁 پاداش خرید: {_scope_label('purchase')}", callback_data='ref_admin:purchase_scope')],
         [InlineKeyboardButton(text=f"💳 درصد شارژ کیف پول: {db.referral_wallet_percent():g}%", callback_data='ref_admin:wallet_percent')],
+        [InlineKeyboardButton(text=f"🔁 پاداش شارژ: {_scope_label('wallet_charge')}", callback_data='ref_admin:wallet_scope')],
         [InlineKeyboardButton(text='📊 آمار دعوت ها', callback_data='ref_admin:stats')],
     ])
 
@@ -80,7 +90,9 @@ async def referral_admin_home_message(message: Message) -> None:
     await message.answer(
         f"وضعیت: {'روشن' if enabled else 'خاموش'}\n"
         f'پاداش از هر خرید موفق: {db.referral_purchase_percent():g}%\n'
+        f'محدوده خرید: {_scope_label("purchase")}\n'
         f'پاداش از هر شارژ کیف پول: {db.referral_wallet_percent():g}%\n'
+        f'محدوده شارژ: {_scope_label("wallet_charge")}\n'
         'پاداش به کیف پول دعوت‌کننده واریز می‌شود.',
         reply_markup=referral_admin_keyboard(),
     )
@@ -106,6 +118,20 @@ async def referral_toggle(callback: CallbackQuery):
     current = bool(db.get_setting('referral_enabled', True))
     db.set_setting('referral_enabled', not current)
     await edit_or_answer(callback, f"وضعیت دعوت دوستان {'روشن' if not current else 'خاموش'} شد.", reply_markup=referral_admin_keyboard())
+    await answer_callback(callback)
+
+
+@referral_router.callback_query(F.data.in_({'ref_admin:purchase_scope', 'ref_admin:wallet_scope'}))
+async def referral_scope_toggle(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await deny_callback(callback)
+        return
+    purchase = callback.data.endswith('purchase_scope')
+    event_type = 'purchase' if purchase else 'wallet_charge'
+    key = 'referral_purchase_scope' if purchase else 'referral_wallet_scope'
+    db.set_setting(key, 'first' if db.referral_reward_scope(event_type) == 'all' else 'all')
+    label = 'خرید' if purchase else 'شارژ کیف پول'
+    await edit_or_answer(callback, f'محدوده پاداش {label}: {_scope_label(event_type)}', reply_markup=referral_admin_keyboard())
     await answer_callback(callback)
 
 

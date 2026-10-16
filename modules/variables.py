@@ -54,6 +54,10 @@ VARIABLE_CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
         ('ref_link', 'لینک دعوت'), ('referral_link', 'لینک دعوت'), ('reward', 'درصدهای پاداش دعوت'), ('reward_raw', 'درصدهای خام'),
         ('condition', 'شرط پاداش'), ('purchase_percent', 'درصد پاداش خرید'), ('wallet_percent', 'درصد پاداش شارژ'),
         ('purchase_scope', 'محدوده پاداش خرید'), ('wallet_scope', 'محدوده پاداش شارژ'),
+        ('friend_name', 'نام دوست دعوت‌شده'), ('friend_username', 'یوزرنیم دوست دعوت‌شده'), ('friend_id', 'شناسه عددی دوست'),
+        ('event_type', 'نوع تراکنش دوست'), ('source_amount', 'مبلغ خرید/شارژ با واحد'), ('source_amount_raw', 'مبلغ خرید/شارژ خام'),
+        ('reward_amount', 'پاداش واریزی با واحد'), ('reward_amount_raw', 'پاداش واریزی خام'), ('percent', 'درصد پاداش'),
+        ('charge_id', 'شناسه درخواست شارژ'),
         ('total', 'کل دعوت‌ها'), ('rewarded', 'دعوت‌های دارای پاداش'), ('pending', 'در انتظار'), ('earned', 'درآمد پاداش'), ('earned_raw', 'درآمد خام'),
     ]),
     ('test', '🧪 سرویس تست', [

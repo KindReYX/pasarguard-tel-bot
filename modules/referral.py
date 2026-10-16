@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -8,7 +11,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 import db
 from keyboards import BTN_REFERRAL, CustomerButtonFilter, back_keyboard
 from permissions import deny_callback, deny_message, is_admin, is_staff
-from utils import edit_or_answer, answer_callback, answer_template, user_template_context
+from utils import edit_or_answer, answer_callback, answer_template, user_template_context, render_template_html, render_template_text
 
 referral_router = Router()
 
@@ -24,6 +27,14 @@ REFERRAL_TEXT_DEFAULT = (
     'کل دعوت ها: {total}\n'
     'دعوت‌های دارای پاداش: {rewarded}\n'
     'درآمد کل شما: {earned}'
+)
+
+REFERRAL_COMMISSION_TEXT_DEFAULT = (
+    '🎉 دوست دعوت‌شده شما {event_type} را با موفقیت انجام داد.\n\n'
+    '👤 دوست: {friend_name}\n'
+    '💳 مبلغ تراکنش: {source_amount}\n'
+    '📊 درصد پاداش: {percent}%\n'
+    '💰 مبلغ واریزی به کیف پول شما: +{reward_amount}'
 )
 
 
@@ -198,21 +209,33 @@ async def notify_pending_referral_commissions(bot, limit: int = 20) -> int:
     delivered = 0
     for commission in db.pending_referral_commissions(limit):
         event_type = str(commission.get('event_type') or '')
-        if event_type == 'wallet_charge':
-            source_label = 'شارژ کیف پول دوست دعوت‌شده'
-        elif event_type == 'purchase':
-            source_label = 'خرید موفق دوست دعوت‌شده'
-        else:
-            source_label = 'تراکنش دوست دعوت‌شده'
+        source_label = 'شارژ کیف پول' if event_type == 'wallet_charge' else 'خرید سرویس' if event_type == 'purchase' else 'پرداخت'
         reward = int(commission.get('reward_amount') or 0)
-        text = (
-            '🎉 پاداش دعوت به کیف پول شما واریز شد.\n\n'
-            f'{source_label}: {format_toman(int(commission.get("base_amount") or 0))}\n'
-            f'درصد پاداش: {float(commission.get("percent") or 0):g}%\n'
-            f'مبلغ واریزی به کیف پول شما: +{format_toman(reward)}'
-        )
+        inviter_id = int(commission['inviter_id'])
+        friend_id = int(commission['invited_id'])
+        friend = db.fetchone('SELECT username,first_name FROM bot_users WHERE telegram_id=?', (friend_id,)) or {}
+        inviter = db.fetchone('SELECT username,first_name FROM bot_users WHERE telegram_id=?', (inviter_id,)) or {}
+        context = user_template_context(SimpleNamespace(id=inviter_id, username=inviter.get('username'), first_name=inviter.get('first_name')))
+        context.update({
+            'friend_id': friend_id,
+            'friend_name': friend.get('first_name') or ('@' + str(friend['username']) if friend.get('username') else str(friend_id)),
+            'friend_username': ('@' + str(friend['username'])) if friend.get('username') else '',
+            'event_type': source_label,
+            'source_amount': format_toman(int(commission.get('base_amount') or 0)),
+            'source_amount_raw': int(commission.get('base_amount') or 0),
+            'reward_amount': format_toman(reward),
+            'reward_amount_raw': reward,
+            'percent': f'{float(commission.get("percent") or 0):g}',
+            'order_id': commission.get('event_id') if event_type == 'purchase' else '',
+            'charge_id': commission.get('event_id') if event_type == 'wallet_charge' else '',
+        })
+        template = str(db.get_setting('referral_commission_text', REFERRAL_COMMISSION_TEXT_DEFAULT) or REFERRAL_COMMISSION_TEXT_DEFAULT)
         try:
-            await bot.send_message(int(commission['inviter_id']), text)
+            rendered = await render_template_html(bot, template, context)
+            try:
+                await bot.send_message(inviter_id, rendered, parse_mode='HTML')
+            except TelegramBadRequest:
+                await bot.send_message(inviter_id, render_template_text(template, context), parse_mode=None)
         except Exception as exc:
             db.mark_referral_commission_notification_failed(int(commission['id']), type(exc).__name__)
             db.record_system_error(

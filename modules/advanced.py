@@ -755,12 +755,13 @@ async def advanced_edit_start(callback: CallbackQuery, state: FSMContext):
             'پیام بعدی کل متن فعلی است. آن را Copy کنید، فقط بخش دلخواه را تغییر دهید و متن کامل جدید را بفرستید.\n'
             'بعد از متن می توانید استیکر بفرستید و در پایان /done بزنید.'
         )
-        await edit_or_answer(
-            callback, intro,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ لغو', callback_data=f'adv:cat:{item.group}')]]),
-        )
-        current = str(db.get_setting(item.key, item.default) or '')
-        await callback.message.answer(current or ' ')
+        with edit_runtime.output_passthrough():
+            await edit_or_answer(
+                callback, intro,
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ لغو', callback_data=f'adv:cat:{item.group}')]]),
+            )
+            current = str(db.get_setting(item.key, item.default) or '')
+            await callback.message.answer(current or ' ')
         await answer_callback(callback)
         return
     await state.set_state(AdvancedState.edit_value)
@@ -788,12 +789,13 @@ async def advanced_edit_start(callback: CallbackQuery, state: FSMContext):
         if item.hint:
             intro += f'{item.hint}\n\n'
         intro += 'پیام بعدی کل متن فعلی است. Copy کنید، فقط بخش دلخواه را تغییر دهید و متن کامل جدید را بفرستید.'
-        await edit_or_answer(
-            callback, intro,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ لغو', callback_data=f'adv:cat:{item.group}')]]),
-        )
-        current = str(db.get_setting(item.key, item.default) or '')
-        await callback.message.answer(current or ' ')
+        with edit_runtime.output_passthrough():
+            await edit_or_answer(
+                callback, intro,
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='❌ لغو', callback_data=f'adv:cat:{item.group}')]]),
+            )
+            current = str(db.get_setting(item.key, item.default) or '')
+            await callback.message.answer(current or ' ')
     else:
         await edit_or_answer(
             callback,

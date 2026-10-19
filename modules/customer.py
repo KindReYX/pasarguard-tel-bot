@@ -17,6 +17,7 @@ from aiogram.exceptions import TelegramBadRequest
 
 import api_client
 import db
+import service_categories
 from config import settings
 from keyboards import (
     BTN_BUY_SUBSCRIPTION,
@@ -393,22 +394,30 @@ def validate_customer_username(username: str) -> str:
     return username
 
 
-def build_panel_note_for_order(order: dict) -> str:
-    """Use the buyer's Telegram numeric ID as the panel note."""
+def build_panel_note_for_telegram_user(user_id: int, fallback: str = 'unknown') -> str:
+    """Use the Telegram account identity, never the panel config username."""
     try:
-        user_id = int(order.get('user_id') or 0)
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        uid = 0
+    if uid <= 0:
+        return fallback
+    try:
+        row = db.fetchone('SELECT username FROM bot_users WHERE telegram_id=?', (uid,)) or {}
+        username = str(row.get('username') or '').strip().lstrip('@')
+        if re.fullmatch(r'[A-Za-z0-9_]+', username):
+            return f'@{username} | {uid}'
     except Exception:
-        user_id = 0
-    return str(user_id) if user_id > 0 else 'unknown'
+        pass
+    return str(uid)
+
+
+def build_panel_note_for_order(order: dict) -> str:
+    return build_panel_note_for_telegram_user(order.get('user_id'))
 
 
 def build_panel_note_for_test(user_id: int) -> str:
-    """Use the Telegram numeric ID for test service notes too."""
-    try:
-        uid = int(user_id)
-    except Exception:
-        uid = 0
-    return str(uid) if uid > 0 else 'test'
+    return build_panel_note_for_telegram_user(user_id, fallback='test')
 
 
 def get_pack_meta(template_id: str) -> dict:
@@ -1809,6 +1818,15 @@ async def service_import_finish(message: Message, state: FSMContext):
             package_id=None,
             package_name=None,
         )
+        # The panel owner is an admin account; the note identifies the Telegram
+        # customer. Never put the panel username or panel numeric id in it.
+        telegram_name = str(getattr(message.from_user, 'username', '') or '').lstrip('@')
+        note = f'@{telegram_name} | {uid}' if re.fullmatch(r'[A-Za-z0-9_]+', telegram_name) else build_panel_note_for_telegram_user(uid)
+        try:
+            user_data = await api_client.update_user(username, {'note': note})
+            db.update_user_service_snapshot(service_id, user_data, sub_url, links)
+        except Exception as note_exc:
+            db.record_system_error('customer.import_service.note', str(note_exc), user_id=uid, entity_type='service', entity_id=str(service_id))
         db.add_log(
             uid,
             'customer_import_service',
@@ -1822,11 +1840,8 @@ async def service_import_finish(message: Message, state: FSMContext):
         except Exception:
             pass
         service = db.get_user_service(service_id, uid) or {}
-        await message.answer(
-            f'✅ سرویس با موفقیت به حساب شما اضافه شد.\n\nنام سرویس: {copy_code(username)}\nاز این به بعد از بخش «سرویس‌های من» قابل مدیریت و تمدید است.',
-            reply_markup=service_detail_keyboard(service_id, _service_detail_context(service, user_data)),
-            parse_mode='Markdown',
-        )
+        await message.answer(f'✅ سرویس {copy_code(username)} به حساب شما اضافه شد.', parse_mode='Markdown')
+        await show_import_category(message, service_id, user_data)
     except LookupError as exc:
         code = str(exc)
         if code == 'service_match_ambiguous':
@@ -1992,6 +2007,105 @@ async def service_auto_renew_toggle(callback: CallbackQuery):
     await callback.answer(f"تمدید خودکار {'روشن' if not current else 'خاموش'} شد.", show_alert=True)
 
 
+def import_category_keyboard(service_id: int, products: list[dict], *, inferred: bool) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text=f'✅ {p["name"]}' if inferred else f'📦 {p["name"]}', callback_data=f'cust_import_category:{service_id}:{p["id"]}')]
+            for p in products]
+    rows.append([InlineKeyboardButton(text='📞 ارتباط با پشتیبانی', callback_data='cust_import_support')])
+    rows.append([InlineKeyboardButton(text='🔙 سرویس‌های من', callback_data='cust_services')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def show_import_category(target, service_id: int, user_data: dict) -> None:
+    try:
+        matches = await service_categories.eligible_products(user_data)
+    except Exception as exc:
+        db.record_system_error('customer.import_service.categories', str(exc), entity_type='service', entity_id=str(service_id))
+        matches = []
+    inferred = len(matches) == 1
+    products = matches if matches else customer_available_products()
+    if inferred:
+        text = f'کانفیگ شما از دسته «{html.escape(str(matches[0]["name"]))}» است. تأیید می‌کنید؟'
+    elif products:
+        text = 'دسته کانفیگ از گروه‌های فعال مشخص نشد. لطفاً دسته درست را انتخاب کنید؛ سپس آن را تأیید کنید.'
+    else:
+        text = 'بسته فعالی برای این کانفیگ پیدا نشد. لطفاً با پشتیبانی ارتباط بگیرید.'
+    kb = import_category_keyboard(service_id, products, inferred=inferred)
+    if isinstance(target, CallbackQuery):
+        await edit_or_answer(target, text, reply_markup=kb, parse_mode='HTML')
+        await target.answer()
+    else:
+        await target.answer(text, reply_markup=kb, parse_mode='HTML')
+
+
+@customer_router.callback_query(F.data == 'cust_import_support')
+async def import_support(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    support = str(db.get_setting('support_username', settings.support_username) or '').strip().lstrip('@')
+    if db.get_setting('support_mode', 'support_message') == 'support_contact':
+        url = f'https://t.me/{support}' if support and not support.startswith(('http://', 'https://')) else support
+        markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='💬 پیام به پشتیبانی', url=url)]]) if url else None
+        await callback.message.answer('📞 ارتباط با پشتیبانی', reply_markup=markup)
+    else:
+        await state.set_state(CustomerTicketState.waiting_subject)
+        await callback.message.answer('🎫 پشتیبانی\n\nموضوع تیکت را ارسال کنید.', reply_markup=ticket_cancel_keyboard())
+
+
+@customer_router.callback_query(F.data.startswith('cust_import_category:'))
+async def import_category_choice(callback: CallbackQuery):
+    try:
+        _, sid, pid = callback.data.split(':')
+        service = db.get_user_service(int(sid), callback.from_user.id)
+        product = db.fetchone('SELECT id, name FROM products WHERE id=? AND is_active=1', (int(pid),))
+    except (ValueError, TypeError):
+        service = product = None
+    if not service or not product:
+        await callback.answer('سرویس یا دسته در دسترس نیست.', show_alert=True)
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='✅ تأیید دسته', callback_data=f'cust_import_confirm:{sid}:{pid}')],
+        [InlineKeyboardButton(text='🔙 تغییر دسته', callback_data=f'cust_import_retry:{sid}')],
+        [InlineKeyboardButton(text='📞 ارتباط با پشتیبانی', callback_data='cust_import_support')],
+    ])
+    await edit_or_answer(callback, f'دسته انتخابی: «{html.escape(str(product["name"]))}»\nآیا این دسته متعلق به کانفیگ شماست؟', reply_markup=kb, parse_mode='HTML')
+    await callback.answer()
+
+
+@customer_router.callback_query(F.data.startswith('cust_import_retry:'))
+async def import_category_retry(callback: CallbackQuery):
+    sid = int(callback.data.rsplit(':', 1)[1])
+    service = db.get_user_service(sid, callback.from_user.id)
+    if not service:
+        await callback.answer('سرویس پیدا نشد.', show_alert=True)
+        return
+    await show_import_category(callback, sid, await api_client.get_user(service.get('panel_username') or service['service_username']))
+
+
+@customer_router.callback_query(F.data.startswith('cust_import_confirm:'))
+async def import_category_confirm(callback: CallbackQuery):
+    _, sid, pid = callback.data.split(':')
+    service = db.get_user_service(int(sid), callback.from_user.id)
+    product = db.fetchone('SELECT id, name FROM products WHERE id=? AND is_active=1', (int(pid),))
+    if not service or not product:
+        await callback.answer('سرویس یا دسته در دسترس نیست.', show_alert=True)
+        return
+    try:
+        panel_user = await api_client.get_user(service.get('panel_username') or service['service_username'])
+        matches = await service_categories.eligible_products(panel_user)
+        matched = next((p for p in matches if p['id'] == int(pid)), None)
+        if not matched:
+            await callback.answer('گروه فعال این دسته با کانفیگ سازگار نیست؛ با پشتیبانی تماس بگیرید.', show_alert=True)
+            return
+        tid = matched['packages'][0]
+        if not service_categories.assign_service_package(int(sid), callback.from_user.id, tid, product['name']):
+            await callback.answer('سرویس تغییر کرده است. دوباره تلاش کنید.', show_alert=True)
+            return
+        await edit_or_answer(callback, f'✅ دسته «{html.escape(str(product["name"]))}» ثبت شد. اکنون می‌توانید بسته‌های همین دسته را برای تمدید انتخاب کنید.', reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔁 تمدید', callback_data=f'cust_service_renew:{sid}')], [InlineKeyboardButton(text='📞 ارتباط با پشتیبانی', callback_data='cust_import_support')]]), parse_mode='HTML')
+        await callback.answer()
+    except Exception as exc:
+        db.record_system_error('customer.import_service.confirm', str(exc), user_id=callback.from_user.id, entity_type='service', entity_id=str(sid))
+        await callback.answer('بررسی دسته موقتاً ممکن نیست. لطفاً دوباره تلاش کنید.', show_alert=True)
+
+
 @customer_router.callback_query(F.data.startswith('cust_service_renew:'))
 async def service_renew(callback: CallbackQuery, state: FSMContext):
     service_id = int(callback.data.split(':', 1)[1])
@@ -2000,10 +2114,30 @@ async def service_renew(callback: CallbackQuery, state: FSMContext):
         await callback.answer('سرویس پیدا نشد.', show_alert=True)
         return
 
-    # Offer visible renewal plans so user can renew with their current plan or choose another plan
+    # Imported services need a verified product before any payment is offered.
+    if not service.get('package_id'):
+        try:
+            user_data = await api_client.get_user(service.get('panel_username') or service['service_username'])
+            await show_import_category(callback, service_id, user_data)
+        except Exception as exc:
+            db.record_system_error('customer.renew.category', str(exc), user_id=callback.from_user.id, entity_type='service', entity_id=str(service_id))
+            await callback.answer('بررسی گروه‌ها موقتاً ممکن نیست.', show_alert=True)
+        return
+    meta_current = get_pack_meta(str(service['package_id']))
+    product_id = meta_current.get('product_id')
+    product = db.fetchone('SELECT id FROM products WHERE id=? AND is_active=1', (product_id,)) if product_id else None
+    if not product:
+        await callback.answer('دسته این سرویس فعال نیست. با پشتیبانی تماس بگیرید.', show_alert=True)
+        return
     try:
-        packs = await load_full_visible_packs()
-        items = visible_pack_rows(packs)
+        live_user = await api_client.get_user(service.get('panel_username') or service['service_username'])
+        compatible = await service_categories.eligible_products(live_user)
+        matching = next((p for p in compatible if p['id'] == int(product_id)), None)
+        if matching is None:
+            await callback.answer('گروه فعال سرویس با بسته‌های این دسته سازگار نیست. با پشتیبانی تماس بگیرید.', show_alert=True)
+            return
+        packs = await load_full_product_packs(int(product_id))
+        items = [(pack, meta) for pack, meta in visible_pack_rows_for_product(packs, int(product_id)) if str(pack['id']) in matching['packages']]
     except Exception:
         items = []
 
@@ -2018,25 +2152,7 @@ async def service_renew(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    # Fallback to current plan if pack list is empty or API unavailable
-    meta = get_pack_meta(str(service.get('package_id')))
-    price = int(meta.get('price_amount') or 0)
-    if price <= 0:
-        await callback.answer('قیمت این بسته برای تمدید تنظیم نشده است.', show_alert=True)
-        return
-    await state.clear()
-    await state.update_data(
-        package_id=str(service.get('package_id')),
-        package_name=package_display_name_for_template(service.get('package_id'), service.get('package_name')),
-        price_toman=price,
-        discount_amount=0,
-        coupon_id=None,
-        coupon_code=None,
-        service_username=str(service.get('service_username')),
-        renew_service_id=service_id,
-        order_type='renew',
-    )
-    await show_preinvoice(callback, state)
+    await callback.answer('بسته فعال سازگار پیدا نشد. لطفاً بعداً تلاش کنید یا با پشتیبانی تماس بگیرید.', show_alert=True)
 
 
 @customer_router.callback_query(F.data.startswith('cust_renew_pack:'))
@@ -2050,6 +2166,21 @@ async def choose_renew_pack(callback: CallbackQuery, state: FSMContext):
         return
     pack = await api_client.get_user_template(template_id)
     meta = get_pack_meta(template_id)
+    current_meta = get_pack_meta(str(service.get('package_id')))
+    if not current_meta.get('product_id') or meta.get('product_id') != current_meta.get('product_id') or pack.get('is_disabled'):
+        await callback.answer('این بسته متعلق به دسته سرویس شما نیست.', show_alert=True)
+        return
+    try:
+        live_user = await api_client.get_user(service.get('panel_username') or service['service_username'])
+        compatible = await service_categories.eligible_products(live_user)
+        matching = next((p for p in compatible if p['id'] == int(meta['product_id'])), None)
+        if not matching or str(template_id) not in matching['packages']:
+            await callback.answer('گروه سرویس با این بسته سازگار نیست.', show_alert=True)
+            return
+    except Exception as exc:
+        db.record_system_error('customer.renew.pack_groups', str(exc), user_id=callback.from_user.id, entity_type='service', entity_id=str(service_id))
+        await callback.answer('بررسی گروه بسته موقتاً ممکن نیست.', show_alert=True)
+        return
     price = int(meta.get('price_amount') or 0)
     if int(meta.get('use_product_price') or 0) and meta.get('product_id'):
         price = public_price_for_pack(meta.get('product_id'), pack)

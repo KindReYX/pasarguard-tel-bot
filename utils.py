@@ -182,7 +182,16 @@ async def render_custom_emoji_output(
     # A tg-emoji tag cannot render under plain/Markdown modes. Normalize existing tags
     # back to tokens, escape the surrounding text, and emit one valid HTML payload.
     normalized = BUTTON_TG_EMOJI_RE.sub(lambda m: f'[{m.group(1)}]', raw)
-    rendered = await render_template_html(bot, normalized, {})
+    # This is an output-format conversion, not template rendering. Passing an
+    # empty context through render_template_html removed literal {variables}
+    # from admin editing prompts whenever they also contained Premium Emoji.
+    ids = list(dict.fromkeys(match.group(1) for match in CUSTOM_EMOJI_RE.finditer(normalized)))
+    alts = await _custom_emoji_alts(bot, ids)
+    escaped = html.escape(normalized)
+    rendered = CUSTOM_EMOJI_RE.sub(
+        lambda m: f'<tg-emoji emoji-id="{m.group(1)}">{html.escape(alts.get(m.group(1), "⭐"))}</tg-emoji>',
+        escaped,
+    )
     return rendered, 'HTML'
 
 

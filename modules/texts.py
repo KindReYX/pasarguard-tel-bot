@@ -10,6 +10,7 @@ from keyboards import EditableButtonFilter
 from keyboards import back_keyboard, BTN_TEXTS
 from permissions import deny_callback, deny_message, is_admin
 from modules.referral import REFERRAL_COMMISSION_TEXT_DEFAULT
+from modules import edit_runtime
 from utils import get_content_stickers, set_content_stickers, message_text_with_custom_emoji_tokens
 
 texts_router = Router()
@@ -74,8 +75,9 @@ async def text_edit_start(callback: CallbackQuery, state: FSMContext):
     current=str(db.get_setting(key, default) or '')
     sticker_count=len(get_content_stickers(key)) if key in CONTENT_MEDIA_KEYS else 0
     await state.set_state(TextState.wait_text); await state.update_data(key=key, pending_stickers=[])
-    await callback.message.answer(f'✏️ {label}\nکلید: {key}\nمتغیرهای مجاز: {variables}\nاستیکرهای فعلی: {sticker_count}\n\nپیام بعدی کل متن فعلی است؛ Copy کن، فقط بخش دلخواه را تغییر بده و متن کامل را بفرست.')
-    await callback.message.answer(current or ' ')
+    with edit_runtime.output_passthrough():
+        await callback.message.answer(f'✏️ {label}\nکلید: {key}\nمتغیرهای مجاز: {variables}\nاستیکرهای فعلی: {sticker_count}\n\nپیام بعدی کل متن فعلی است؛ Copy کن، فقط بخش دلخواه را تغییر بده و متن کامل را بفرست.')
+        await callback.message.answer(current or ' ')
     await callback.answer()
 
 @texts_router.message(TextState.wait_text)

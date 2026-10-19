@@ -13,6 +13,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, C
 
 import api_client
 import db
+import service_categories
 from utils import edit_or_answer, person_display, get_button_style, infer_button_kind, message_text_with_custom_emoji_tokens, friendly_error
 from modules.packs import package_display_name_for_template
 from keyboards import EditableButtonFilter
@@ -31,6 +32,7 @@ class UserStates(StatesGroup):
 class AdminServiceStates(StatesGroup):
     waiting_add_days = State()
     waiting_add_traffic = State()
+    assign_custom = State()
 
 
 def code(value) -> str:
@@ -323,9 +325,13 @@ def build_admin_service_keyboard(service: dict) -> InlineKeyboardMarkup:
         toggle_text = '✅ فعال کردن (پنل)'
         toggle_cb = f'users:svc_toggle:{sid}'
 
-    return InlineKeyboardMarkup(inline_keyboard=[
+    rows = [
         [InlineKeyboardButton(text='➕ افزودن روز', callback_data=f'users:svc_add_days:{sid}'),
          InlineKeyboardButton(text='➕ افزودن حجم (GB)', callback_data=f'users:svc_add_traffic:{sid}')],
+    ]
+    if not service.get('order_id'):
+        rows.append([InlineKeyboardButton(text='🗂 تخصیص به دسته', callback_data=f'users:assign_start:{sid}')])
+    rows.extend([
         [InlineKeyboardButton(text=toggle_text, callback_data=toggle_cb)],
         [InlineKeyboardButton(text='♻️ ریووک / تغییر لینک ساب', callback_data=f'users:svc_revoke:{sid}')],
         [InlineKeyboardButton(text='🔄 بروزرسانی از پنل', callback_data=f'users:svc_refresh:{sid}')],
@@ -333,6 +339,219 @@ def build_admin_service_keyboard(service: dict) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text='🔙 برگشت به سرویس‌ها', callback_data=f'users:services:{uid}:0')],
         [InlineKeyboardButton(text=f'👤 برگشت به کاربر {uid}', callback_data=f'users:view:{uid}')],
     ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def assignment_service(actor_id: int, sid: int) -> dict | None:
+    svc = db.fetchone('SELECT * FROM user_services WHERE id=? AND is_active=1', (sid,))
+    return svc if svc and not svc.get('order_id') and can_manage_services(actor_id, int(svc['telegram_id'])) else None
+
+
+@users_router.callback_query(F.data.startswith('users:assign_start:'))
+async def assign_start(callback: CallbackQuery, state: FSMContext):
+    sid = int(callback.data.rsplit(':', 1)[1])
+    svc = assignment_service(callback.from_user.id, sid)
+    if not svc:
+        await deny_callback(callback)
+        return
+    await state.clear()
+    rows = db.fetchall('SELECT id, name FROM products WHERE is_active=1 ORDER BY sort_order, id')
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        *[[InlineKeyboardButton(text=str(p['name']), callback_data=f'users:assign_product:{sid}:{p["id"]}')] for p in rows],
+        [InlineKeyboardButton(text='❌ انصراف', callback_data=f'users:svc_view:{sid}')],
+    ])
+    await edit_or_answer(callback, 'دسته واقعی این کانفیگ را انتخاب کنید:', reply_markup=kb)
+    await callback.answer()
+
+
+@users_router.callback_query(F.data.startswith('users:assign_product:'))
+async def assign_product(callback: CallbackQuery, state: FSMContext):
+    _, _, sid, pid = callback.data.split(':')
+    svc = assignment_service(callback.from_user.id, int(sid))
+    if not svc:
+        await deny_callback(callback)
+        return
+    await state.clear()
+    rows = db.fetchall('''SELECT ps.template_id FROM package_settings ps
+        JOIN products p ON p.id=ps.product_id WHERE ps.product_id=? AND p.is_active=1 AND ps.is_visible=1
+        ORDER BY ps.sort_order, ps.template_id''', (int(pid),))
+    buttons = []
+    for row in rows:
+        template = await api_client.get_user_template(row['template_id'])
+        if not template.get('is_disabled'):
+            buttons.append([InlineKeyboardButton(text=str(template.get('name') or row['template_id']), callback_data=f'users:assign_pack:{sid}:{row["template_id"]}')])
+    buttons.append([InlineKeyboardButton(text='🔙 دسته‌ها', callback_data=f'users:assign_start:{sid}')])
+    await edit_or_answer(callback, 'بسته فعال این دسته را انتخاب کنید:', reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+@users_router.callback_query(F.data.startswith('users:assign_pack:'))
+async def assign_pack(callback: CallbackQuery, state: FSMContext):
+    _, _, sid, tid = callback.data.split(':')
+    svc = assignment_service(callback.from_user.id, int(sid))
+    if not svc:
+        await deny_callback(callback)
+        return
+    meta = db.fetchone('SELECT * FROM package_settings WHERE template_id=? AND is_visible=1', (tid,))
+    template = await api_client.get_user_template(tid)
+    groups = await service_categories.active_groups()
+    choices = [(int(g), groups[int(g)]) for g in template.get('group_ids') or [] if int(g) in groups]
+    if not meta or template.get('is_disabled') or not choices:
+        await callback.answer('این بسته گروه فعال ندارد.', show_alert=True)
+        return
+    await state.update_data(assign_sid=int(sid), assign_tid=tid, assign_pid=int(meta['product_id']))
+    buttons = [[InlineKeyboardButton(text=str(group['name']), callback_data=f'users:assign_group:{sid}:{gid}')] for gid, group in choices]
+    buttons.append([InlineKeyboardButton(text='🔙 بسته‌ها', callback_data=f'users:assign_product:{sid}:{meta["product_id"]}')])
+    await edit_or_answer(callback, 'گروه پنل را انتخاب کنید:', reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
+
+
+@users_router.callback_query(F.data.startswith('users:assign_group:'))
+async def assign_group(callback: CallbackQuery, state: FSMContext):
+    _, _, sid, gid = callback.data.split(':')
+    svc = assignment_service(callback.from_user.id, int(sid))
+    data = await state.get_data()
+    if not svc or data.get('assign_sid') != int(sid):
+        await callback.answer('انتخاب منقضی شده است؛ دوباره شروع کنید.', show_alert=True)
+        return
+    groups = await service_categories.active_groups()
+    template = await api_client.get_user_template(data['assign_tid'])
+    if int(gid) not in groups or int(gid) not in (template.get('group_ids') or []):
+        await callback.answer('گروه فعال نیست.', show_alert=True)
+        return
+    await state.update_data(assign_gid=int(gid))
+    await assign_choice_prompt(callback, state, 'volume')
+
+
+async def assign_choice_prompt(callback: CallbackQuery, state: FSMContext, field: str):
+    data = await state.get_data()
+    sid = data['assign_sid']
+    label = 'حجم باقی‌مانده' if field == 'volume' else 'روز باقی‌مانده'
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='همان مقدار کنونی', callback_data=f'users:assign_option:{sid}:{field}:keep')],
+        [InlineKeyboardButton(text='مقدار دلخواه', callback_data=f'users:assign_option:{sid}:{field}:custom')],
+        [InlineKeyboardButton(text='صفر', callback_data=f'users:assign_option:{sid}:{field}:zero')],
+        [InlineKeyboardButton(text='❌ انصراف', callback_data=f'users:svc_view:{sid}')],
+    ])
+    await edit_or_answer(callback, f'برای {label} چه کاری انجام شود؟', reply_markup=kb)
+    await callback.answer()
+
+
+@users_router.callback_query(F.data.startswith('users:assign_option:'))
+async def assign_option(callback: CallbackQuery, state: FSMContext):
+    _, _, sid, field, mode = callback.data.split(':')
+    data = await state.get_data()
+    if not assignment_service(callback.from_user.id, int(sid)) or data.get('assign_sid') != int(sid) or field not in ('volume', 'days') or mode not in ('keep', 'custom', 'zero'):
+        await callback.answer('انتخاب نامعتبر است.', show_alert=True)
+        return
+    if mode == 'custom':
+        await state.update_data(assign_input_field=field)
+        await state.set_state(AdminServiceStates.assign_custom)
+        await edit_or_answer(callback, 'مقدار دلخواه را به صورت عدد مثبت ارسال کنید (حجم به گیگابایت، زمان به روز).')
+        await callback.answer()
+        return
+    await state.update_data(**{f'assign_{field}': mode})
+    if field == 'volume':
+        await assign_choice_prompt(callback, state, 'days')
+    else:
+        await assign_review(callback, state)
+
+
+@users_router.message(AdminServiceStates.assign_custom)
+async def assign_custom(message: Message, state: FSMContext):
+    data = await state.get_data()
+    sid = data.get('assign_sid')
+    if not sid or not assignment_service(message.from_user.id, int(sid)):
+        await state.clear()
+        return
+    try:
+        value = float((message.text or '').strip())
+        if not 0 < value <= 100000 or (data.get('assign_input_field') == 'days' and not value.is_integer()):
+            raise ValueError
+    except ValueError:
+        await message.answer('عدد معتبر مثبت ارسال کنید (روز باید عدد صحیح باشد).')
+        return
+    field = data['assign_input_field']
+    await state.update_data(**{f'assign_{field}': value})
+    await state.set_state(None)
+    if field == 'volume':
+        await message.answer('حجم ثبت شد. روز باقی‌مانده را انتخاب کنید:', reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=label, callback_data=f'users:assign_option:{sid}:days:{mode}')]
+            for label, mode in [('همان مقدار کنونی', 'keep'), ('مقدار دلخواه', 'custom'), ('صفر', 'zero')]
+        ]))
+    else:
+        await message.answer('روز ثبت شد. برای بررسی و تأیید نهایی بزنید:', reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='بررسی', callback_data=f'users:assign_review:{sid}')]]))
+
+
+@users_router.callback_query(F.data.startswith('users:assign_review:'))
+async def assign_review_callback(callback: CallbackQuery, state: FSMContext):
+    await assign_review(callback, state)
+
+
+async def assign_review(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    sid = data.get('assign_sid')
+    svc = assignment_service(callback.from_user.id, int(sid or 0))
+    if not svc or data.get('assign_volume') is None or data.get('assign_days') is None:
+        await callback.answer('انتخاب ناقص یا منقضی شده است.', show_alert=True)
+        return
+    template = await api_client.get_user_template(data['assign_tid'])
+    product = db.fetchone('SELECT name FROM products WHERE id=?', (data['assign_pid'],)) or {}
+    text = (f'تخصیص سرویس {plain(svc["service_username"])} به دسته {plain(product.get("name"))}\n'
+            f'بسته: {plain(template.get("name"))} | گروه: {code(data["assign_gid"])}\n'
+            f'حجم باقی‌مانده: {code(data["assign_volume"])} | روز باقی‌مانده: {code(data["assign_days"])}\n\nتغییرات پنل و دسته پس از تأیید اعمال می‌شود.')
+    await edit_or_answer(callback, text, parse_mode='HTML', reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text='✅ تأیید نهایی', callback_data=f'users:assign_commit:{sid}')],
+        [InlineKeyboardButton(text='❌ انصراف', callback_data=f'users:svc_view:{sid}')],
+    ]))
+    await callback.answer()
+
+
+@users_router.callback_query(F.data.startswith('users:assign_commit:'))
+async def assign_commit(callback: CallbackQuery, state: FSMContext):
+    sid = int(callback.data.rsplit(':', 1)[1])
+    svc = assignment_service(callback.from_user.id, sid)
+    data = await state.get_data()
+    if not svc or data.get('assign_sid') != sid or data.get('assign_volume') is None or data.get('assign_days') is None:
+        await callback.answer('درخواست نامعتبر یا منقضی است.', show_alert=True)
+        return
+    try:
+        template = await api_client.get_user_template(data['assign_tid'])
+        groups = await service_categories.active_groups()
+        group_id = int(data['assign_gid'])
+        meta = db.fetchone('SELECT product_id, is_visible FROM package_settings WHERE template_id=?', (data['assign_tid'],)) or {}
+        product = db.fetchone('SELECT name FROM products WHERE id=? AND is_active=1', (data['assign_pid'],))
+        if group_id not in groups or group_id not in (template.get('group_ids') or []) or template.get('is_disabled') or not product or not meta.get('is_visible') or int(meta['product_id']) != data['assign_pid']:
+            await callback.answer('بسته یا گروه تغییر کرده است؛ دوباره انتخاب کنید.', show_alert=True)
+            return
+        username = svc.get('panel_username') or svc['service_username']
+        current = await api_client.get_user(username)
+        used = int(current.get('used_traffic') or 0)
+        payload = {'group_ids': [group_id]}
+        owner_row = db.fetchone('SELECT username FROM bot_users WHERE telegram_id=?', (int(svc['telegram_id']),)) or {}
+        telegram_name = str(owner_row.get('username') or '').strip().lstrip('@')
+        payload['note'] = f'@{telegram_name} | {svc["telegram_id"]}' if telegram_name and telegram_name.isascii() and all(c.isalnum() or c == '_' for c in telegram_name) else str(svc['telegram_id'])
+        volume = data['assign_volume']
+        if volume == 'zero':
+            payload['data_limit'] = max(1, used)  # zero is unlimited in the panel
+        elif volume != 'keep':
+            payload['data_limit'] = max(1, used + int(float(volume) * 1024 ** 3))
+        days = data['assign_days']
+        if days == 'zero':
+            payload['expire'] = int(time.time())
+        elif days != 'keep':
+            payload['expire'] = int(time.time()) + int(days) * 86400
+        updated = await api_client.update_user(username, payload)
+        db.update_user_service_snapshot(sid, updated, svc.get('subscription_url'), json.loads(svc.get('links_json') or '[]'))
+        if not service_categories.assign_service_package(sid, int(svc['telegram_id']), data['assign_tid'], product['name']):
+            raise LookupError('Service ownership changed during assignment')
+        db.add_log(callback.from_user.id, 'assign_imported_service', 'service', str(sid), {'package_id': data['assign_tid'], 'group_id': group_id, 'volume': volume, 'days': days})
+        await state.clear()
+        await edit_or_answer(callback, '✅ دسته، گروه، حجم و زمان سرویس ثبت شد.', reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='🔙 سرویس', callback_data=f'users:svc_view:{sid}')]]))
+        await callback.answer()
+    except Exception as exc:
+        db.record_system_error('users.assign_imported_service', str(exc), user_id=callback.from_user.id, entity_type='service', entity_id=str(sid))
+        await callback.answer('ثبت تغییرات ناموفق بود. دوباره تلاش کنید.', show_alert=True)
 
 
 @users_router.message(EditableButtonFilter(BTN_USERS))

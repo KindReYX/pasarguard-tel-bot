@@ -492,7 +492,7 @@ def user_template_context(user: Any = None, *, support: str = '') -> dict[str, A
 COPYABLE_TEMPLATE_VARS = {
     'card_number', 'sub_link', 'subscription_url', 'order_id', 'user_id', 'package_id',
     'service_name', 'service_username', 'panel_username', 'username', 'client',
-    'receipt_id', 'entity_id', 'ticket_id', 'coupon_code', 'payment_id', 'transaction_id',
+    'receipt_id', 'entity_id', 'ticket_id', 'coupon_code', 'discount_code', 'payment_id', 'transaction_id',
     'ref_link', 'referral_link',
 }
 

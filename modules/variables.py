@@ -36,11 +36,12 @@ VARIABLE_CATEGORIES: list[tuple[str, str, list[tuple[str, str]]]] = [
     ('order', '🧾 سفارش / پرداخت', [
         ('order_id', 'شماره سفارش'), ('entity_id', 'شناسه موجودیت/سفارش'), ('order_type', 'نوع سفارش'),
         ('amount', 'مبلغ'), ('discount', 'تخفیف'), ('discount_raw', 'تخفیف خام'),
+        ('after_discount', 'مبلغ پس از تخفیف، پیش از کیف پول'), ('after_discount_raw', 'مبلغ خام پس از تخفیف، پیش از کیف پول'),
         ('wallet_used', 'مصرف کیف پول'), ('wallet_used_raw', 'مصرف کیف پول خام'),
         ('payable', 'مبلغ قابل پرداخت'), ('payable_raw', 'مبلغ قابل پرداخت خام'),
         ('stars', 'مقدار Stars'), ('stars_amount', 'مقدار خام Stars'), ('status', 'وضعیت'), ('final_status', 'وضعیت نهایی'),
         ('created_at', 'تاریخ ایجاد'), ('payment_id', 'شناسه پرداخت'), ('transaction_id', 'شناسه تراکنش'), ('receipt_id', 'شناسه فیش'),
-        ('coupon_code', 'کد تخفیف'), ('service_message', 'پیام وضعیت سرویس'),
+        ('coupon_code', 'کد تخفیف استفاده‌شده'), ('discount_code', 'کد تخفیف استفاده‌شده'), ('service_message', 'پیام وضعیت سرویس'),
     ]),
     ('service', '📡 سرویس', [
         ('service_id', 'شناسه سرویس'), ('service_name', 'نام سرویس'), ('service_username', 'نام کاربری سرویس'),

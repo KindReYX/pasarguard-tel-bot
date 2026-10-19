@@ -85,11 +85,28 @@ def enrich_template_context(context: dict[str, Any] | None = None) -> dict[str, 
             mapping = {
                 'user_id':'user_id', 'package_id':'package_id', 'package_name':'package_name',
                 'amount':'amount', 'stars_amount':'stars_amount', 'status':'status', 'created_at':'created_at',
-                'service_name':'service_username', 'price_raw':'amount',
+                'service_name':'service_username',
             }
             for target, source in mapping.items():
                 if ctx.get(target) in (None, '') and order.get(source) not in (None, ''):
                     ctx[target] = order.get(source)
+            if order:
+                discounted = int(order.get('amount_toman') or order.get('amount') or 0)
+                discount = int(order.get('discount_amount') or 0)
+                wallet_used = int(order.get('wallet_used') or 0)
+                values = {
+                    'price_raw': str(discounted + discount),
+                    'coupon_code': str(order.get('discount_code') or 'ندارد'),
+                    'discount_code': str(order.get('discount_code') or 'ندارد'),
+                    'discount': _fmt_toman(discount), 'discount_raw': str(discount),
+                    'after_discount': _fmt_toman(discounted), 'after_discount_raw': str(discounted),
+                    'wallet_used': _fmt_toman(wallet_used), 'wallet_used_raw': str(wallet_used),
+                    'payable': _fmt_toman(max(0, discounted - wallet_used)),
+                    'payable_raw': str(max(0, discounted - wallet_used)),
+                }
+                for key, value in values.items():
+                    if ctx.get(key) in (None, ''):
+                        ctx[key] = value
 
         # Package meta -> canonical bot display name + product.
         package_id = str(ctx.get('package_id') or ctx.get('template_id') or '').strip()

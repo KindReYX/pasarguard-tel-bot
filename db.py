@@ -2372,7 +2372,9 @@ INVOICE_TEXT_DEFAULT = (
     'نام بسته: {package_name}\n'
     'نام سرویس: {service_name}\n'
     'مبلغ اصلی: {price}\n'
+    'کد تخفیف: {coupon_code}\n'
     'تخفیف: {discount}\n'
+    'مبلغ پس از تخفیف: {after_discount}\n'
     'کیف پول مصرف شده: {wallet_used}\n'
     'مبلغ قابل پرداخت: {payable}\n'
     'پرداخت Stars: {stars} ⭐️\n'
@@ -2385,6 +2387,7 @@ INVOICE_TEXT_DEFAULT = (
 def create_invoice_text(order: dict[str, Any], service_message: str = '') -> str:
     amount = int(order.get('amount_toman') or order.get('amount') or 0)
     discount = int(order.get('discount_amount') or 0)
+    original_price = amount + discount
     wallet_used = int(order.get('wallet_used') or 0)
     stars = int(order.get('stars_amount') or 0)
     payable = max(0, amount - wallet_used)
@@ -2419,11 +2422,17 @@ def create_invoice_text(order: dict[str, Any], service_message: str = '') -> str
         'package_name': _html_text(order.get('package_name') or '-'),
         'service_name': _html_code(order.get('customer_username') or '-'),
         'customer_username': _html_code(order.get('customer_username') or '-'),
-        'price': f'{amount:,} تومان',
-        'price_raw': str(amount),
+        'price': f'{original_price:,} تومان',
+        'price_raw': str(original_price),
         'amount': f'{amount:,} تومان',
         'discount': f'{discount:,} تومان',
         'discount_raw': str(discount),
+        # Orders store the discounted service total in amount_toman. Wallet is
+        # accounted for separately; payable is the remaining external payment.
+        'coupon_code': _html_code(order.get('discount_code') or 'ندارد'),
+        'discount_code': _html_code(order.get('discount_code') or 'ندارد'),
+        'after_discount': f'{amount:,} تومان',
+        'after_discount_raw': str(amount),
         'wallet_used': f'{wallet_used:,} تومان',
         'wallet_used_raw': str(wallet_used),
         'payable': f'{payable:,} تومان',

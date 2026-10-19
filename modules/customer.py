@@ -925,6 +925,26 @@ def build_preinvoice_text(data: dict) -> str:
     )
 
 
+def preinvoice_variables(data: dict, wallet_balance: int = 0) -> dict:
+    price = int(data.get('price_toman') or 0)
+    discount = max(0, min(price, int(data.get('discount_amount') or 0)))
+    after_discount = price - discount
+    wallet_used = min(max(0, int(wallet_balance)), after_discount)
+    code = str(data.get('coupon_code') or 'ندارد')
+    return {
+        'order_type': 'تمدید سرویس' if data.get('renew_service_id') else 'خرید سرویس',
+        'product_name': str(data.get('product_name') or 'نامشخص'),
+        'package_name': str(data.get('package_name') or '-'),
+        'service_name': str(data.get('service_username') or '-'),
+        'price': format_toman(price), 'price_raw': str(price),
+        'coupon_code': code, 'discount_code': code,
+        'discount': format_toman(discount), 'discount_raw': str(discount),
+        'after_discount': format_toman(after_discount), 'after_discount_raw': str(after_discount),
+        'wallet_used': format_toman(wallet_used), 'wallet_used_raw': str(wallet_used),
+        'payable': format_toman(after_discount - wallet_used), 'payable_raw': str(after_discount - wallet_used),
+    }
+
+
 def service_status_label(status: Any) -> str:
     status = str(status or '').lower()
     if status in ('active', 'enabled'):
@@ -1117,6 +1137,14 @@ async def show_customer_home(message: Message) -> None:
 async def show_preinvoice(callback_or_message, state: FSMContext) -> None:
     data = await state.get_data()
     text = build_preinvoice_text(data)
+    user = getattr(callback_or_message, 'from_user', None)
+    try:
+        balance = db.wallet_balance(user.id) if user else 0
+    except Exception:
+        balance = 0
+    # Expose exact values to the existing per-message editor without replacing
+    # its stable key or discarding texts already customized by admins.
+    variables = preinvoice_variables(data, balance)
     if isinstance(callback_or_message, CallbackQuery):
         await edit_or_answer(callback_or_message, text, reply_markup=preinvoice_keyboard(), parse_mode='Markdown')
         await callback_or_message.answer()
